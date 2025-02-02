@@ -1,0 +1,6 @@
+[workspace]
+members = ["engine", "game", "perft"]
+resolver = "2"
+
+[profile.release]
+debug = 1

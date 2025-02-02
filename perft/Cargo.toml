@@ -1,0 +1,12 @@
+[package]
+name = "perft"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+engine = { path = "../engine" }
+game = { path = "../game" }
+rayon = "1.10.0"
+smallvec = "1.13.2"
