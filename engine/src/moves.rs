@@ -116,12 +116,24 @@ impl GameState {
                 new_en_passant_target = Some(file);
             }
             MoveFlag::CastleEast => {
+                let blockers = friends_bb.union() | enemies_bb.union();
+                if is_dangerous(SquareIndex::E1, enemies_bb, blockers)
+                    || is_dangerous(SquareIndex::F1, enemies_bb, blockers)
+                {
+                    return Err(IllegalMoveError); // Cannot castle through danger
+                }
                 pieces.set(SquareIndex::H1, None);
                 pieces.set(SquareIndex::F1, Some((friends_color, PieceKind::Rook)));
                 let rook_move_bb = (SquareIndex::H1.bb() | SquareIndex::F1.bb()).get();
                 friends_bb[PieceKind::Rook] ^= rook_move_bb;
             }
             MoveFlag::CastleWest => {
+                let blockers = friends_bb.union() | enemies_bb.union();
+                if is_dangerous(SquareIndex::E1, enemies_bb, blockers)
+                    || is_dangerous(SquareIndex::D1, enemies_bb, blockers)
+                {
+                    return Err(IllegalMoveError); // Cannot castle through danger
+                }
                 pieces.set(SquareIndex::A1, None);
                 pieces.set(SquareIndex::D1, Some((friends_color, PieceKind::Rook)));
                 let rook_move_bb = (SquareIndex::A1.bb() | SquareIndex::D1.bb()).get();
@@ -130,21 +142,12 @@ impl GameState {
             MoveFlag::Normal => {}
         }
 
-        // Check the move's legality
+        // Check that the move does not put the king in danger
         let blockers = friends_bb.union() | enemies_bb.union();
         for sq in SquareIter(friends_bb[PieceKind::King]) {
             if is_dangerous(sq, enemies_bb, blockers) {
                 return Err(IllegalMoveError);
             }
-        }
-        if (mv.flag == MoveFlag::CastleEast
-            && (is_dangerous(SquareIndex::E1, enemies_bb, blockers)
-                || is_dangerous(SquareIndex::F1, enemies_bb, blockers)))
-            || (mv.flag == MoveFlag::CastleWest
-                && (is_dangerous(SquareIndex::E1, enemies_bb, blockers)
-                    || is_dangerous(SquareIndex::D1, enemies_bb, blockers)))
-        {
-            return Err(IllegalMoveError);
         }
 
         // Revoke own castle rights
