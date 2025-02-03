@@ -84,6 +84,19 @@ pub enum SquareIndex {
     A8, B8, C8, D8, E8, F8, G8, H8 = 63,
 }
 
+/// An iterator over the set squares if a bitboard.
+pub(crate) struct SquareIter(pub u64);
+
+impl Iterator for SquareIter {
+    type Item = SquareIndex;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sq = NonZeroU64::new(self.0).map(SquareIndex::from_bb)?;
+        self.0 &= self.0 - 1;
+        Some(sq)
+    }
+}
+
 impl GameState {
     pub fn piece(&self, square: SquareIndex) -> Option<(PlayerColor, PieceKind)> {
         let square = match self.friends_color {

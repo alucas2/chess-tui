@@ -1,7 +1,7 @@
-use std::num::NonZeroU64;
-
 use crate::{
-    game_state::{GameState, PieceBitboards, PieceKind, PlayerColor, RankIndex, SquareIndex},
+    game_state::{
+        GameState, PieceBitboards, PieceKind, PlayerColor, RankIndex, SquareIndex, SquareIter,
+    },
     lookup_tables as lut,
 };
 
@@ -249,19 +249,6 @@ fn is_dangerous(sq: SquareIndex, enemies_bb: PieceBitboards, obstacles: u64) -> 
         & (enemies_bb[PieceKind::Rook] | enemies_bb[PieceKind::Queen]);
     attackers |= king_reachable(sq) & enemies_bb[PieceKind::King];
     attackers != 0
-}
-
-/// An iterator over the set squares if a bitboard.
-struct SquareIter(pub u64);
-
-impl Iterator for SquareIter {
-    type Item = SquareIndex;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let sq = NonZeroU64::new(self.0).map(SquareIndex::from_bb)?;
-        self.0 &= self.0 - 1;
-        Some(sq)
-    }
 }
 
 /// Push pseudo-legal moves into a Vec.

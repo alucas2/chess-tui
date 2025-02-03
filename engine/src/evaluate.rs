@@ -1,4 +1,4 @@
-use crate::{GameState, Move, MoveFlag, PieceKind};
+use crate::{game_state::SquareIter, lookup_tables as lut, GameState, Move, MoveFlag, PieceKind};
 
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
@@ -26,10 +26,21 @@ impl std::ops::Neg for Score {
     }
 }
 
+fn piece_value_table(kind: PieceKind) -> &'static [i16; 64] {
+    match kind {
+        PieceKind::Pawn => &lut::PAWN_VALUE,
+        PieceKind::Knight => &lut::KNIGHT_VALUE,
+        PieceKind::Bishop => &lut::BISHOP_VALUE,
+        PieceKind::Rook => &lut::ROOK_VALUE,
+        PieceKind::Queen => &lut::QUEEN_VALUE,
+        PieceKind::King => &lut::KING_VALUE,
+    }
+}
+
 fn piece_value(kind: PieceKind) -> i16 {
     match kind {
         PieceKind::Pawn => 100,
-        PieceKind::Knight => 300,
+        PieceKind::Knight => 320,
         PieceKind::Bishop => 330,
         PieceKind::Rook => 500,
         PieceKind::Queen => 900,
@@ -40,17 +51,16 @@ fn piece_value(kind: PieceKind) -> i16 {
 /// Make a fast evaluation of a gamestate
 pub fn eval_heuristic(gs: &GameState) -> Score {
     let mut score = 0;
-
-    // Sum the friend material
     for kind in PieceKind::iter() {
-        score += (gs.friends_bb[kind]).count_ones() as i16 * piece_value(kind);
+        // Sum the friend material
+        for sq in SquareIter(gs.friends_bb[kind]) {
+            score += piece_value_table(kind)[sq as usize];
+        }
+        // Subtract the enemy material
+        for sq in SquareIter(gs.enemies_bb[kind]) {
+            score -= piece_value_table(kind)[sq.mirror() as usize];
+        }
     }
-
-    // Subtract the enemy material
-    for kind in PieceKind::iter() {
-        score -= (gs.enemies_bb[kind]).count_ones() as i16 * piece_value(kind);
-    }
-
     Score(score)
 }
 
