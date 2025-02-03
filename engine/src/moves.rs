@@ -183,7 +183,7 @@ impl GameState {
     }
 
     pub fn is_check(&self) -> bool {
-        let blockers = self.friends_bb.union() | self.friends_bb.union();
+        let blockers = self.friends_bb.union() | self.enemies_bb.union();
         SquareIter(self.friends_bb[PieceKind::King])
             .any(|sq| is_dangerous(sq, self.enemies_bb, blockers))
     }
