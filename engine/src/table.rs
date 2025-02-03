@@ -4,11 +4,11 @@ use std::hash::{Hash, Hasher};
 
 use crate::{
     atomic_cell::AtomicCell,
-    game_state::{CastleAvailability, FileIndex, GameState, HalfPiecesPositions, PlayerColor},
+    game_state::{CastleAvailability, CompactPieceArray, FileIndex, GameState, PlayerColor},
 };
 
 /// Size of a table entry is:
-/// `8 + 106 + size_of::<X> + size_of::<V>`
+/// `8 + 38 + size_of::<X> + size_of::<V>`
 /// Where 8 corresponds to the size of the seqlock and 106 the size of the gamestate
 pub struct Table<X, V> {
     entries: Vec<AtomicCell<Option<Entry<X, V>>>>,
@@ -19,10 +19,10 @@ pub struct TableKey<X> {
     hash: u64,
 }
 
+/// size is at least: 38 + sizeof::<X>
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct Tag<X> {
-    friends: HalfPiecesPositions,
-    enemies: HalfPiecesPositions,
+    pieces: CompactPieceArray,
     friends_color: PlayerColor,
     friends_castle: CastleAvailability,
     enemies_castle: CastleAvailability,
@@ -39,8 +39,7 @@ struct Entry<X, V> {
 impl<X: Hash> TableKey<X> {
     pub fn new(gs: &GameState, extra: X) -> TableKey<X> {
         let tag = Tag {
-            friends: gs.friends,
-            enemies: gs.enemies,
+            pieces: gs.pieces,
             friends_color: gs.friends_color,
             friends_castle: gs.friends_castle,
             enemies_castle: gs.enemies_castle,
@@ -56,7 +55,7 @@ impl<X: Hash> TableKey<X> {
 
 impl<X: Eq + Copy, V: Copy> Table<X, V> {
     pub fn new(capacity: usize) -> Table<X, V> {
-        assert_eq!(size_of::<AtomicCell<Option<Entry<X, V>>>>(), 128);
+        assert_eq!(size_of::<AtomicCell<Option<Entry<X, V>>>>(), 64);
         Table {
             entries: (0..capacity).map(|_| AtomicCell::new(None)).collect(),
         }

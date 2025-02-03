@@ -43,12 +43,12 @@ pub fn eval_heuristic(gs: &GameState) -> Score {
 
     // Sum the friend material
     for kind in PieceKind::iter() {
-        score += gs.friends.bb(kind).count_ones() as i16 * piece_value(kind);
+        score += (gs.friends_bb[kind]).count_ones() as i16 * piece_value(kind);
     }
 
     // Subtract the enemy material
     for kind in PieceKind::iter() {
-        score -= gs.enemies.bb(kind).count_ones() as i16 * piece_value(kind);
+        score -= (gs.enemies_bb[kind]).count_ones() as i16 * piece_value(kind);
     }
 
     Score(score)
@@ -61,18 +61,13 @@ pub(crate) fn eval_move(gs: &GameState, mv: Move) -> i16 {
     let mut score = 0;
 
     // Bonus for capturing an enemy with a cheap friend
-    let mut capture_gain = 0;
-    for kind in PieceKind::iter() {
-        capture_gain +=
-            (gs.enemies.bb(kind) & mv.dst.bb().get()).count_ones() as i16 * piece_value(kind);
-    }
-    if capture_gain != 0 {
-        score += 1000 + capture_gain - piece_value(mv.who)
+    if let Some((_, kind)) = gs.pieces.get(mv.dst) {
+        score += 1000 + piece_value(kind) - piece_value(mv.who);
     }
 
     // Bonus for promoting a piece
     if let MoveFlag::Promotion(kind) = mv.flag {
-        score += piece_value(kind)
+        score += 2000 + piece_value(kind)
     }
 
     score

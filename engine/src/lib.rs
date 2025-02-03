@@ -11,4 +11,4 @@ pub use game_state::{
 };
 pub use moves::{IllegalMoveError, Move, MoveFlag, MoveInfo};
 pub use search::{ScoreInfo, Search, SearchStatus};
-pub use table::{TableKey, Table};
+pub use table::{Table, TableKey};

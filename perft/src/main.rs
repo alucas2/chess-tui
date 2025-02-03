@@ -3,7 +3,7 @@
 
 use rayon::prelude::*;
 
-use engine::{TableKey, GameState};
+use engine::{GameState, TableKey};
 use smallvec::SmallVec;
 
 // GameState + depth -> perft
@@ -59,9 +59,9 @@ fn main() {
             if let Some(true_value) = true_value {
                 println!("{fen:<90} Depth: {depth:<2} Value: {true_value:<10}");
                 let gs = game::fen::parse(fen).unwrap();
+                assert_eq!(game::fen::unparse(&gs), fen);
                 let result = perft(&gs, depth, true, &cache);
                 assert_eq!(result, true_value);
-                assert_eq!(game::fen::unparse(&gs), fen);
             }
         }
     }

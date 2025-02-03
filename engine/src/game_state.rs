@@ -5,24 +5,34 @@ use std::num::NonZeroU64;
 /// The internal representation uses the terms "friend" and "enemy".
 /// It is laid out in memory as if "friend" was the white player, but if "friend" is actually the
 /// black player, then the internal representation is the mirror of the reality.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct GameState {
-    pub(crate) friends: HalfPiecesPositions,
-    pub(crate) enemies: HalfPiecesPositions,
+    /// Representation of the board as an array
+    pub(crate) pieces: CompactPieceArray,
+    /// Bitboard mask for each kind of friendly piece
+    pub(crate) friends_bb: PieceBitboards,
+    /// Bitboard mask for each kind of enemy piece
+    pub(crate) enemies_bb: PieceBitboards,
+    /// Color of the player to move
     pub(crate) friends_color: PlayerColor,
+    /// Castling rights of the player to move
     pub(crate) friends_castle: CastleAvailability,
+    /// Castling rights of the opponent
     pub(crate) enemies_castle: CastleAvailability,
+    /// File of the last pawn double push for en passant captures
     pub(crate) en_passant_target: Option<FileIndex>,
+    /// Number of full moves, incremented after black has played
     pub(crate) fullmoves: u16,
 }
 
-/// Internal structure that contains the bitboards for each piece type of the same color,
-/// which is half of the information to get the positions of all pieces.
+/// Array of 6 bitboards, one for each piece kind
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct HalfPiecesPositions {
-    /// Array of bitboards indexed by `Piece`
-    pub(crate) piece_bb: [u64; 6],
-}
+pub(crate) struct PieceBitboards([u64; 6]);
+
+/// Array of 64 squares containing a piece kind and a color.
+/// Uses a compact representation of 4 bits per square
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CompactPieceArray([u64; 4]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PieceKind {
@@ -80,27 +90,7 @@ impl GameState {
             PlayerColor::White => square,
             PlayerColor::Black => square.mirror(),
         };
-        let sq_bb = square.bb().get();
-        let found_friend_piece = {
-            let mut iter =
-                PieceKind::iter().filter(|&p| self.friends.piece_bb[p as usize] & sq_bb != 0);
-            let found = iter.next();
-            assert_eq!(iter.next(), None, "Multiple pieces on the same square");
-            found
-        };
-        let found_enemy_piece = {
-            let mut iter =
-                PieceKind::iter().filter(|&p| self.enemies.piece_bb[p as usize] & sq_bb != 0);
-            let found = iter.next();
-            assert_eq!(iter.next(), None, "Multiple pieces on the same square");
-            found
-        };
-        match (found_friend_piece, found_enemy_piece) {
-            (None, None) => None,
-            (Some(p), None) => Some((self.friends_color, p)),
-            (None, Some(p)) => Some((self.friends_color.opposite(), p)),
-            (Some(_), Some(_)) => panic!("Multiple pieces on the same square"),
-        }
+        self.pieces.get(square)
     }
 
     pub fn set_piece(&mut self, square: SquareIndex, piece: Option<(PlayerColor, PieceKind)>) {
@@ -108,18 +98,24 @@ impl GameState {
             PlayerColor::White => square,
             PlayerColor::Black => square.mirror(),
         };
+        // Update bitboards
         let sq_bb = square.bb().get();
-        for kind in PieceKind::iter() {
-            self.friends.piece_bb[kind as usize] &= !sq_bb;
-            self.enemies.piece_bb[kind as usize] &= !sq_bb;
+        if let Some((color, kind)) = self.pieces.get(square) {
+            if color == self.friends_color {
+                self.friends_bb[kind] &= !sq_bb;
+            } else {
+                self.enemies_bb[kind] &= !sq_bb;
+            }
         }
         if let Some((color, kind)) = piece {
             if color == self.friends_color {
-                self.friends.piece_bb[kind as usize] |= sq_bb
+                self.friends_bb[kind] |= sq_bb;
             } else {
-                self.enemies.piece_bb[kind as usize] |= sq_bb
+                self.enemies_bb[kind] |= sq_bb;
             };
         }
+        // Place piece
+        self.pieces.set(square, piece);
     }
 
     pub fn active_color(&self) -> PlayerColor {
@@ -129,8 +125,9 @@ impl GameState {
     pub fn set_active_color(&mut self, color: PlayerColor) {
         if self.friends_color != color {
             *self = GameState {
-                friends: self.enemies.mirror(),
-                enemies: self.friends.mirror(),
+                pieces: self.pieces.mirror(),
+                friends_bb: self.enemies_bb.mirror(),
+                enemies_bb: self.friends_bb.mirror(),
                 friends_color: self.friends_color.opposite(),
                 friends_castle: self.enemies_castle,
                 enemies_castle: self.friends_castle,
@@ -172,23 +169,83 @@ impl GameState {
     }
 }
 
-impl HalfPiecesPositions {
-    pub(crate) fn bb(&self, piece: PieceKind) -> u64 {
-        self.piece_bb[piece as usize]
+impl PieceBitboards {
+    #[inline]
+    pub(crate) fn mirror(self) -> PieceBitboards {
+        PieceBitboards(self.0.map(u64::swap_bytes))
     }
 
-    pub(crate) fn bb_mut(&mut self, piece: PieceKind) -> &mut u64 {
-        &mut self.piece_bb[piece as usize]
+    #[inline]
+    pub(crate) fn union(self) -> u64 {
+        self.0.iter().fold(0, |a, b| a | b)
+    }
+}
+
+impl std::ops::Index<PieceKind> for PieceBitboards {
+    type Output = u64;
+
+    #[inline]
+    fn index(&self, kind: PieceKind) -> &u64 {
+        &self.0[kind as usize]
+    }
+}
+
+impl std::ops::IndexMut<PieceKind> for PieceBitboards {
+    #[inline]
+    fn index_mut(&mut self, kind: PieceKind) -> &mut u64 {
+        &mut self.0[kind as usize]
+    }
+}
+
+impl Default for CompactPieceArray {
+    fn default() -> Self {
+        CompactPieceArray([0xffffffffffffffff; 4])
+    }
+}
+
+impl CompactPieceArray {
+    #[inline]
+    pub(crate) fn get(&self, sq: SquareIndex) -> Option<(PlayerColor, PieceKind)> {
+        // Get the 4-bit integer representing the content of the square
+        // b3 represents the color of the piece
+        // b2-b0 represent the kind of piece, or the absence of piece
+        let i = sq as usize;
+        let nibble = self.0[i / 16] >> (i % 16 * 4);
+        let kind = match nibble & 0b0111 {
+            0 => PieceKind::Pawn,
+            1 => PieceKind::Knight,
+            2 => PieceKind::Bishop,
+            3 => PieceKind::Rook,
+            4 => PieceKind::Queen,
+            5 => PieceKind::King,
+            _ => return None,
+        };
+        let color = if nibble & 0b1000 == 0 {
+            PlayerColor::White
+        } else {
+            PlayerColor::Black
+        };
+        Some((color, kind))
     }
 
-    pub(crate) fn any(&self) -> u64 {
-        self.piece_bb.iter().fold(0, std::ops::BitOr::bitor)
-    }
-
-    pub(crate) fn mirror(&self) -> HalfPiecesPositions {
-        HalfPiecesPositions {
-            piece_bb: self.piece_bb.map(u64::swap_bytes),
+    #[inline]
+    pub(crate) fn set(&mut self, sq: SquareIndex, value: Option<(PlayerColor, PieceKind)>) {
+        let i = sq as usize;
+        let mask = 0b1111;
+        self.0[i / 16] |= mask << (i % 16 * 4);
+        if let Some((color, kind)) = value {
+            let nibble = kind as u64 | (color as u64) << 3;
+            self.0[i / 16] ^= (mask ^ nibble) << (i % 16 * 4);
         }
+    }
+
+    pub(crate) fn mirror(&self) -> CompactPieceArray {
+        CompactPieceArray([
+            self.0[3].rotate_left(32),
+            self.0[2].rotate_left(32),
+            self.0[1].rotate_left(32),
+            self.0[0].rotate_left(32),
+        ])
     }
 }
 

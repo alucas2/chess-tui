@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{self, AtomicUsize, Ordering},
 };
 
-#[repr(align(128))]
+#[repr(align(64))]
 pub struct AtomicCell<T> {
     /// Contains 1 if locked by a writer, or else contains an even sequence number
     seq: AtomicUsize,
