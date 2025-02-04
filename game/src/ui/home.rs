@@ -266,12 +266,15 @@ impl Home {
             .fg(style::color::WHITE_PIECE);
         let (text, block) = match (
             self.gamestate.current().active_color(),
-            self.gamestate.available_moves().len(),
+            self.gamestate.current().is_check(),
+            self.gamestate.available_moves().is_empty(),
         ) {
-            (PlayerColor::White, 0) => ("Black won the game!", black_block),
-            (PlayerColor::Black, 0) => ("White won the game!", white_block),
-            (PlayerColor::White, _) => ("White to move", white_block),
-            (PlayerColor::Black, _) => ("Black to move", black_block),
+            (PlayerColor::White, true, true) => ("Black won the game!", black_block),
+            (PlayerColor::Black, true, true) => ("White won the game!", white_block),
+            (PlayerColor::White, false, true) => ("Stalemate!", white_block),
+            (PlayerColor::Black, false, true) => ("Stalemate!", black_block),
+            (PlayerColor::White, _, false) => ("White to move", white_block),
+            (PlayerColor::Black, _, false) => ("Black to move", black_block),
         };
         Paragraph::new(text)
             .centered()
