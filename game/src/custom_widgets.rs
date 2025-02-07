@@ -21,7 +21,7 @@ pub struct Board {
 #[derive(Clone, Copy)]
 pub struct Piece {
     pub kind: engine::PieceKind,
-    pub color: engine::PlayerColor,
+    pub side: engine::PlayerSide,
 }
 
 /// Widget that represents a square
@@ -113,9 +113,9 @@ impl Widget for Piece {
             engine::PieceKind::Queen => style::QUEEN,
             engine::PieceKind::King => style::KING,
         };
-        let fill_color = match self.color {
-            engine::PlayerColor::White => style::color::WHITE_PIECE,
-            engine::PlayerColor::Black => style::color::BLACK_PIECE,
+        let fill_color = match self.side {
+            engine::PlayerSide::White => style::color::WHITE_PIECE,
+            engine::PlayerSide::Black => style::color::BLACK_PIECE,
         };
         let color_lut = |id| match id {
             1 => Some(fill_color),

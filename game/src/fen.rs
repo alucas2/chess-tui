@@ -1,6 +1,4 @@
-use engine::{
-    CastleAvailability, FileIndex, GameState, PieceKind, PlayerColor, RankIndex, SquareIndex,
-};
+use engine::{FileIndex, GameState, PieceKind, PlayerSide, RankIndex, SquareIndex};
 
 /// An error raised when a FEN string could not be parsed.
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +18,7 @@ mod unparse {
         let mut result = String::new();
         unparse::pieces(gs, &mut result);
         result.push(' ');
-        unparse::active_color(gs, &mut result);
+        unparse::side_to_move(gs, &mut result);
         result.push(' ');
         unparse::castle_availability(gs, &mut result);
         result.push(' ');
@@ -36,14 +34,14 @@ mod unparse {
             for file in FileIndex::iter() {
                 match gs.piece(SquareIndex::from_coords(file, rank)) {
                     None => skip += 1,
-                    Some((color, kind)) => {
+                    Some((side, kind)) => {
                         if skip != 0 {
                             result.push(char::from_digit(skip, 10).unwrap());
                         }
                         skip = 0;
-                        match color {
-                            PlayerColor::White => result.push(kind.label().to_ascii_uppercase()),
-                            PlayerColor::Black => result.push(kind.label().to_ascii_lowercase()),
+                        match side {
+                            PlayerSide::White => result.push(kind.label().to_ascii_uppercase()),
+                            PlayerSide::Black => result.push(kind.label().to_ascii_lowercase()),
                         }
                     }
                 }
@@ -57,26 +55,28 @@ mod unparse {
         }
     }
 
-    fn active_color(gs: &GameState, result: &mut String) {
-        result.push(gs.active_color().label());
+    fn side_to_move(gs: &GameState, result: &mut String) {
+        result.push(gs.side_to_move().label());
     }
 
     fn castle_availability(gs: &GameState, result: &mut String) {
-        let white = gs.castle_availability(PlayerColor::White);
-        let black = gs.castle_availability(PlayerColor::Black);
-        if !(white.west || white.east || black.west || black.east) {
+        if !(gs.castle_east(PlayerSide::White)
+            || gs.castle_west(PlayerSide::White)
+            || gs.castle_east(PlayerSide::Black)
+            || gs.castle_west(PlayerSide::Black))
+        {
             result.push('-');
         } else {
-            if white.east {
+            if gs.castle_east(PlayerSide::White) {
                 result.push('K');
             }
-            if white.west {
+            if gs.castle_west(PlayerSide::White) {
                 result.push('Q');
             }
-            if black.east {
+            if gs.castle_east(PlayerSide::Black) {
                 result.push('k');
             }
-            if black.west {
+            if gs.castle_west(PlayerSide::Black) {
                 result.push('q');
             }
         }
@@ -86,9 +86,9 @@ mod unparse {
         match gs.en_passant_target() {
             Some(file) => {
                 result.push(file.label());
-                match gs.active_color() {
-                    PlayerColor::White => result.push(RankIndex::_6.label()),
-                    PlayerColor::Black => result.push(RankIndex::_3.label()),
+                match gs.side_to_move() {
+                    PlayerSide::White => result.push(RankIndex::_6.label()),
+                    PlayerSide::Black => result.push(RankIndex::_3.label()),
                 }
             }
             None => result.push('-'),
@@ -113,7 +113,7 @@ mod parse {
             pieces(s, &mut gs)?;
         }
         if let Some(s) = split.next() {
-            active_color(s, &mut gs)?;
+            side_to_move(s, &mut gs)?;
         }
         if let Some(s) = split.next() {
             castle_availability(s, &mut gs)?;
@@ -147,12 +147,12 @@ mod parse {
                     continue;
                 }
                 let kind = PieceKind::parse(c).ok_or(ParseError)?;
-                let color = if c.is_uppercase() {
-                    PlayerColor::White
+                let side = if c.is_uppercase() {
+                    PlayerSide::White
                 } else {
-                    PlayerColor::Black
+                    PlayerSide::Black
                 };
-                gs.set_piece(SquareIndex::from_coords(file, rank), Some((color, kind)));
+                gs.set_piece(SquareIndex::from_coords(file, rank), Some((side, kind)));
             }
             if skip != 0 {
                 return Err(ParseError);
@@ -171,9 +171,9 @@ mod parse {
         Ok(())
     }
 
-    fn active_color(s: &str, gs: &mut GameState) -> Result<(), ParseError> {
+    fn side_to_move(s: &str, gs: &mut GameState) -> Result<(), ParseError> {
         let mut s = s.chars();
-        gs.set_active_color(s.next().and_then(PlayerColor::parse).ok_or(ParseError)?);
+        gs.set_side_to_move(s.next().and_then(PlayerSide::parse).ok_or(ParseError)?);
         if s.next().is_some() {
             return Err(ParseError);
         }
@@ -181,21 +181,17 @@ mod parse {
     }
 
     fn castle_availability(s: &str, gs: &mut GameState) -> Result<(), ParseError> {
-        let mut white = CastleAvailability::default();
-        let mut black = CastleAvailability::default();
         if s != "-" {
             for char in s.chars() {
                 match char {
-                    'K' => white.east = true,
-                    'Q' => white.west = true,
-                    'k' => black.east = true,
-                    'q' => black.west = true,
+                    'K' => gs.set_castle_east(PlayerSide::White, true),
+                    'Q' => gs.set_castle_west(PlayerSide::White, true),
+                    'k' => gs.set_castle_east(PlayerSide::Black, true),
+                    'q' => gs.set_castle_west(PlayerSide::Black, true),
                     _ => return Err(ParseError),
                 }
             }
         }
-        gs.set_castle_availability(PlayerColor::White, white);
-        gs.set_castle_availability(PlayerColor::Black, black);
         Ok(())
     }
 

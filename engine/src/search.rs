@@ -8,10 +8,7 @@ use std::{
 
 use smallvec::SmallVec;
 
-use crate::{
-    evaluate::{self, Score},
-    GameState, Move, Table, TableKey,
-};
+use crate::{lookup_tables as lut, GameState, Move, PieceKind, SquareIter, Table, TableKey};
 
 /// Handle to the search thread
 pub struct Search {
@@ -55,6 +52,28 @@ pub struct SearchStatistics {
     pub table_hits: u64,
     /// Number of successful table entry replacements
     pub table_rewrites: u64,
+}
+
+/// Opaque score that can be compared with other scores.
+/// Score::MAX represents a winning position. Score::MIN represents a losing position.
+/// Score::NEG_INF acts like "negative infinity", which is a placeholder invalid score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+struct Score(i16);
+
+impl Score {
+    const ZERO: Score = Score(0);
+    const MAX: Score = Score(i16::MAX);
+    const MIN: Score = Score(-i16::MAX);
+    const NEG_INF: Score = Score(i16::MIN);
+}
+
+impl std::ops::Neg for Score {
+    type Output = Score;
+
+    fn neg(self) -> Self::Output {
+        Score(-self.0)
+    }
 }
 
 /// Values that are stored in the table.
@@ -103,7 +122,7 @@ impl Search {
                     let score = match score {
                         Score::MIN => ScoreInfo::Loose(depth - 1),
                         Score::MAX => ScoreInfo::Win(depth - 1),
-                        _ => ScoreInfo::Normal(score.get()),
+                        _ => ScoreInfo::Normal(score.0),
                     };
                     *status.write().unwrap() = SearchStatus {
                         thinking: true,
@@ -146,6 +165,7 @@ struct MoveWithKey {
     key: i16,
 }
 
+/// Evaluate a position with a minmax search
 fn eval_minmax(
     gs: &GameState,
     mut alpha: Score,
@@ -178,7 +198,7 @@ fn eval_minmax(
     'cutoff: {
         // Try the cached move first to raise the alpha bound
         if let Some(mv) = move_to_try_first {
-            let next_gs = gs.do_move(mv).expect("Move to try first should be legal");
+            let next_gs = gs.make_move(mv).expect("Move to try first should be legal");
             let branch_score =
                 -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats)?.0;
             if branch_score > score {
@@ -196,7 +216,7 @@ fn eval_minmax(
         let mut moves = SmallVec::<[_; 64]>::new();
         gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
         for MoveWithKey { mv, key } in moves.iter_mut() {
-            *key = evaluate::eval_move(gs, *mv);
+            *key = gs.eval_move(*mv);
         }
 
         // Pop and explore the branches, starting from the most promising
@@ -205,7 +225,7 @@ fn eval_minmax(
             if Some(mv) == move_to_try_first {
                 continue; // Already explored the first move
             }
-            let Ok(next_gs) = gs.do_move(mv) else {
+            let Ok(next_gs) = gs.make_move(mv) else {
                 continue; // Illegal move
             };
             let branch_score =
@@ -241,6 +261,7 @@ fn eval_minmax(
     Ok((score, best_move))
 }
 
+/// Evaluate a position by quiescent search
 fn eval_quiescent(
     gs: &GameState,
     mut alpha: Score,
@@ -265,7 +286,7 @@ fn eval_quiescent(
 
     // In quiescence search, don't forget to consider that we can stop capturing anytime!
     // (Actually not anytime, there might be forced captures, but rarely)
-    let mut score = evaluate::eval_heuristic(gs);
+    let mut score = eval_heuristic(gs);
     alpha = alpha.max(score);
     if alpha >= beta {
         return Ok(score);
@@ -276,13 +297,13 @@ fn eval_quiescent(
     let mut moves = SmallVec::<[_; 16]>::new();
     gs.pseudo_legal_captures(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
-        *key = evaluate::eval_move(gs, *mv);
+        *key = gs.eval_move(*mv);
     }
 
     // Pop and explore the branches, starting from the most promising
     while let Some((index_max, _)) = moves.iter().enumerate().max_by_key(|(_, x)| x.key) {
         let mv = moves.swap_remove(index_max).mv;
-        let Ok(next_gs) = gs.do_move(mv) else {
+        let Ok(next_gs) = gs.make_move(mv) else {
             continue; // Illegal move
         };
         let branch_score = -eval_quiescent(&next_gs, -beta, -alpha, stop, table, stats)?;
@@ -302,4 +323,20 @@ fn eval_quiescent(
         stats.table_rewrites += 1;
     }
     Ok(score)
+}
+
+/// Evaluate a position with a fast heuristic
+fn eval_heuristic(gs: &GameState) -> Score {
+    let mut score = 0;
+    for kind in PieceKind::iter() {
+        // Sum the friend material
+        for sq in SquareIter(gs.friends_bb[kind]) {
+            score += lut::piece_value_table(kind)[sq as usize];
+        }
+        // Subtract the enemy material
+        for sq in SquareIter(gs.enemies_bb[kind]) {
+            score -= lut::piece_value_table(kind)[sq.mirror() as usize];
+        }
+    }
+    Score(score)
 }

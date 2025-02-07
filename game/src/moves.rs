@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use engine::{GameState, Move, MoveFlag, PieceKind, PlayerColor, SquareIndex};
+use engine::{GameState, Move, MoveFlag, PieceKind, PlayerSide, SquareIndex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveWithNotation {
@@ -9,7 +9,7 @@ pub struct MoveWithNotation {
     /// Fullmove number
     pub number: u16,
     /// Player who does the move
-    pub player: PlayerColor,
+    pub player: PlayerSide,
     /// What kind of piece is moving
     pub who: PieceKind,
     /// Starting square of the piece that moves
@@ -42,14 +42,14 @@ pub fn moves_with_notation(gs: &GameState) -> Vec<MoveWithNotation> {
     let mut result = moves
         .iter()
         .filter_map(|&mv| {
-            gs.do_move(mv).ok().map(|next_gs| {
+            gs.make_move(mv).ok().map(|next_gs| {
                 let mv_info = gs.move_info(mv);
                 let capture =
-                    gs.piece(mv_info.end).is_some() || mv_info.flag == engine::MoveFlag::EnPassant;
+                    gs.piece(mv_info.to).is_some() || mv_info.flag == engine::MoveFlag::EnPassant;
                 let outcome = if next_gs.is_check() {
                     let mut next_moves = vec![];
                     next_gs.pseudo_legal_moves(|mv| next_moves.push(mv));
-                    if next_moves.iter().any(|&mv| next_gs.do_move(mv).is_ok()) {
+                    if next_moves.iter().any(|&mv| next_gs.make_move(mv).is_ok()) {
                         Some(MoveOutcome::Check)
                     } else {
                         Some(MoveOutcome::CheckMate)
@@ -60,10 +60,10 @@ pub fn moves_with_notation(gs: &GameState) -> Vec<MoveWithNotation> {
                 MoveWithNotation {
                     inner: mv,
                     number: gs.fullmoves(),
-                    player: gs.active_color(),
-                    who: mv_info.who,
-                    start: mv_info.start,
-                    end: mv_info.end,
+                    player: gs.side_to_move(),
+                    who: mv_info.kind,
+                    start: mv_info.from,
+                    end: mv_info.to,
                     need_start_file: false,
                     need_start_rank: false,
                     capture,
@@ -102,18 +102,18 @@ impl Display for MoveWithNotation {
                 if self.who != PieceKind::Pawn {
                     write!(f, "{}", self.who.label().to_ascii_uppercase())?;
                 }
-                let (start_file, start_rank) = self.start.coords();
-                let (dst_file, dst_rank) = self.end.coords();
+                let (from_file, from_rank) = self.start.coords();
+                let (to_file, to_rank) = self.end.coords();
                 if self.need_start_file || self.capture && self.who == PieceKind::Pawn {
-                    write!(f, "{}", start_file.label())?
+                    write!(f, "{}", from_file.label())?
                 }
                 if self.need_start_rank {
-                    write!(f, "{}", start_rank.label())?
+                    write!(f, "{}", from_rank.label())?
                 }
                 if self.capture {
                     write!(f, "x")?
                 }
-                write!(f, "{}{}", dst_file.label(), dst_rank.label())?
+                write!(f, "{}{}", to_file.label(), to_rank.label())?
             }
         }
         match self.flag {

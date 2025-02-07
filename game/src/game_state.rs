@@ -41,7 +41,7 @@ impl GameStateHistory {
         assert!(self.available_moves.contains(&mv));
         self.move_history.drain(self.position_in_history..);
         self.move_history.push(mv);
-        self.current = self.current.do_move(mv.inner).unwrap();
+        self.current = self.current.make_move(mv.inner).unwrap();
         self.available_moves = moves::moves_with_notation(&self.current);
         self.position_in_history += 1;
     }
@@ -52,7 +52,7 @@ impl GameStateHistory {
         }
         self.current = self.initial;
         for mv in &self.move_history[..(self.position_in_history - 1)] {
-            self.current = self.current.do_move(mv.inner).unwrap()
+            self.current = self.current.make_move(mv.inner).unwrap()
         }
         self.available_moves = moves::moves_with_notation(&self.current);
         self.position_in_history -= 1;
@@ -64,7 +64,7 @@ impl GameStateHistory {
             return false;
         }
         let mv = self.move_history[self.position_in_history];
-        self.current = self.current.do_move(mv.inner).unwrap();
+        self.current = self.current.make_move(mv.inner).unwrap();
         self.available_moves = moves::moves_with_notation(&self.current);
         self.position_in_history += 1;
         true

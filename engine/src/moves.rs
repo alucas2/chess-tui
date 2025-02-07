@@ -1,27 +1,25 @@
 use crate::{
-    game_state::{
-        GameState, PieceBitboards, PieceKind, PlayerColor, RankIndex, SquareIndex, SquareIter,
-    },
-    lookup_tables as lut,
+    game_state::{GameState, PieceBitboards},
+    lookup_tables as lut, PieceKind, PlayerSide, RankIndex, SquareIndex, SquareIter,
 };
 
 /// Opaque move token
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Move {
-    pub(crate) who: PieceKind,
-    /// Note: src is mirrored when it's a black move
-    pub(crate) src: SquareIndex,
-    /// Note: dst is mirrored when it's a black move
-    pub(crate) dst: SquareIndex,
-    pub(crate) flag: MoveFlag,
+    kind: PieceKind,
+    /// Note: square is mirrored when it's a black move
+    from: SquareIndex,
+    /// Note: square is mirrored when it's a black move
+    to: SquareIndex,
+    flag: MoveFlag,
 }
 
 /// Information about a move
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveInfo {
-    pub who: PieceKind,
-    pub start: SquareIndex,
-    pub end: SquareIndex,
+    pub kind: PieceKind,
+    pub from: SquareIndex,
+    pub to: SquareIndex,
     pub flag: MoveFlag,
 }
 
@@ -44,14 +42,14 @@ impl GameState {
     /// Get info about a move.
     /// This function must be called with a move that has been generated from this state!
     pub fn move_info(&self, mv: Move) -> MoveInfo {
-        let (start, end) = match self.friends_color {
-            PlayerColor::White => (mv.src, mv.dst),
-            PlayerColor::Black => (mv.src.mirror(), mv.dst.mirror()),
+        let (start, end) = match self.side_to_move {
+            PlayerSide::White => (mv.from, mv.to),
+            PlayerSide::Black => (mv.from.mirror(), mv.to.mirror()),
         };
         MoveInfo {
-            who: mv.who,
-            start,
-            end,
+            kind: mv.kind,
+            from: start,
+            to: end,
             flag: mv.flag,
         }
     }
@@ -66,121 +64,117 @@ impl GameState {
         gen_moves::<true, F>(self, f)
     }
 
+    /// Make a fast evaluation of a move.
+    /// NOTE: The "score" returned by this function has nothing to do with
+    /// the "score" of a gamestate, the latter being represented by the `Score` type.
+    pub fn eval_move(&self, mv: Move) -> i16 {
+        let mut score = 0;
+
+        // Bonus for capturing an enemy with a cheap friend
+        if let Some((_, kind)) = self.pieces.get(mv.to) {
+            score += 10 * lut::piece_value(kind) - lut::piece_value(mv.kind);
+        }
+
+        // Bonus for promoting a piece
+        if let MoveFlag::Promotion(kind) = mv.flag {
+            score += 2000 + lut::piece_value(kind)
+        }
+
+        score
+    }
+
     /// Perform a move, then flip the position of enemies and friends.
     /// This function must be called with a move that has been generated from this state!
     /// If not, then probably no error will be raised but the returned state will be corrupted.
-    pub fn do_move(&self, mv: Move) -> Result<GameState, IllegalMoveError> {
-        let GameState {
-            mut pieces,
-            mut friends_bb,
-            mut enemies_bb,
-            friends_color,
-            mut friends_castle,
-            mut enemies_castle,
-            en_passant_target,
-            fullmoves,
-        } = self.clone();
-        let mut new_en_passant_target = None;
-        let dst_bb = mv.dst.bb().get();
-        let src_bb = mv.src.bb().get();
-        let move_bb = src_bb | dst_bb;
-
-        // Capture
-        if let Some((_, kind)) = pieces.get(mv.dst) {
-            enemies_bb[kind] ^= dst_bb;
+    pub fn make_move(mut self, mv: Move) -> Result<GameState, IllegalMoveError> {
+        // Capture and displace
+        if let Some((_, kind)) = self.pieces.get(mv.to) {
+            self.remove_piece(mv.to, self.side_to_move.opposite(), kind);
         }
+        self.remove_piece(mv.from, self.side_to_move, mv.kind);
+        self.put_piece(mv.to, self.side_to_move, mv.kind);
 
-        // Move
-        pieces.set(mv.src, None);
-        pieces.set(mv.dst, Some((friends_color, mv.who)));
-        friends_bb[mv.who] ^= move_bb;
-
-        // Special moves
+        // Handle special moves
+        let mut new_en_passant_target = None;
         match mv.flag {
+            MoveFlag::Normal => {}
             MoveFlag::Promotion(prom) => {
-                pieces.set(mv.dst, Some((friends_color, prom)));
-                friends_bb[prom] ^= dst_bb;
-                friends_bb[PieceKind::Pawn] ^= dst_bb;
+                self.remove_piece(mv.to, self.side_to_move, PieceKind::Pawn);
+                self.put_piece(mv.to, self.side_to_move, prom);
             }
             MoveFlag::EnPassant => {
-                let en_passant_sq = SquareIndex::from_coords(
-                    en_passant_target.expect("En passant has no target"),
+                let target = SquareIndex::from_coords(
+                    self.flags.en_passant().expect("En passant has no target"),
                     RankIndex::_5,
                 );
-                let en_passant_bb = en_passant_sq.bb().get();
-                pieces.set(en_passant_sq, None);
-                enemies_bb[PieceKind::Pawn] ^= en_passant_bb;
+                self.remove_piece(target, self.side_to_move.opposite(), PieceKind::Pawn);
             }
             MoveFlag::DoublePush => {
-                let (file, _) = mv.dst.coords();
+                let (file, _) = mv.to.coords();
                 new_en_passant_target = Some(file);
             }
             MoveFlag::CastleEast => {
-                let blockers = friends_bb.union() | enemies_bb.union();
-                if is_dangerous(SquareIndex::E1, enemies_bb, blockers)
-                    || is_dangerous(SquareIndex::F1, enemies_bb, blockers)
+                let blockers = self.friends_bb.union() | self.enemies_bb.union();
+                if is_dangerous(SquareIndex::E1, self.enemies_bb, blockers)
+                    || is_dangerous(SquareIndex::F1, self.enemies_bb, blockers)
                 {
                     return Err(IllegalMoveError); // Cannot castle through danger
                 }
-                pieces.set(SquareIndex::H1, None);
-                pieces.set(SquareIndex::F1, Some((friends_color, PieceKind::Rook)));
-                let rook_move_bb = (SquareIndex::H1.bb() | SquareIndex::F1.bb()).get();
-                friends_bb[PieceKind::Rook] ^= rook_move_bb;
+                self.remove_piece(SquareIndex::H1, self.side_to_move, PieceKind::Rook);
+                self.put_piece(SquareIndex::F1, self.side_to_move, PieceKind::Rook);
             }
             MoveFlag::CastleWest => {
-                let blockers = friends_bb.union() | enemies_bb.union();
-                if is_dangerous(SquareIndex::E1, enemies_bb, blockers)
-                    || is_dangerous(SquareIndex::D1, enemies_bb, blockers)
+                let blockers = self.friends_bb.union() | self.enemies_bb.union();
+                if is_dangerous(SquareIndex::E1, self.enemies_bb, blockers)
+                    || is_dangerous(SquareIndex::D1, self.enemies_bb, blockers)
                 {
                     return Err(IllegalMoveError); // Cannot castle through danger
                 }
-                pieces.set(SquareIndex::A1, None);
-                pieces.set(SquareIndex::D1, Some((friends_color, PieceKind::Rook)));
-                let rook_move_bb = (SquareIndex::A1.bb() | SquareIndex::D1.bb()).get();
-                friends_bb[PieceKind::Rook] ^= rook_move_bb;
+                self.remove_piece(SquareIndex::A1, self.side_to_move, PieceKind::Rook);
+                self.put_piece(SquareIndex::D1, self.side_to_move, PieceKind::Rook);
             }
-            MoveFlag::Normal => {}
         }
 
         // Check that the move does not put the king in danger
-        let blockers = friends_bb.union() | enemies_bb.union();
-        for sq in SquareIter(friends_bb[PieceKind::King]) {
-            if is_dangerous(sq, enemies_bb, blockers) {
+        let blockers = self.friends_bb.union() | self.enemies_bb.union();
+        for sq in SquareIter(self.friends_bb[PieceKind::King]) {
+            if is_dangerous(sq, self.enemies_bb, blockers) {
                 return Err(IllegalMoveError);
             }
         }
 
         // Revoke own castle rights
-        if mv.who == PieceKind::King {
-            friends_castle.east = false;
-            friends_castle.west = false;
-        } else if mv.who == PieceKind::Rook {
-            if mv.src == SquareIndex::H1 {
-                friends_castle.east = false
-            } else if mv.src == SquareIndex::A1 {
-                friends_castle.west = false
+        if mv.kind == PieceKind::King {
+            self.flags.set_castle_east(self.side_to_move, false);
+            self.flags.set_castle_west(self.side_to_move, false);
+        } else if mv.kind == PieceKind::Rook {
+            if mv.from == SquareIndex::H1 {
+                self.flags.set_castle_east(self.side_to_move, false);
+            } else if mv.from == SquareIndex::A1 {
+                self.flags.set_castle_west(self.side_to_move, false);
             }
         }
 
         // Revoke enemy's castle rights
-        if mv.dst == SquareIndex::H8 {
-            enemies_castle.east = false
-        } else if mv.dst == SquareIndex::A8 {
-            enemies_castle.west = false
+        if mv.to == SquareIndex::H8 {
+            self.flags
+                .set_castle_east(self.side_to_move.opposite(), false);
+        } else if mv.to == SquareIndex::A8 {
+            self.flags
+                .set_castle_west(self.side_to_move.opposite(), false);
         }
 
-        // Flip the friends and enemies roles
+        // Flip sides
+        self.flags.set_en_passant(new_en_passant_target);
         Ok(GameState {
-            pieces: pieces.mirror(),
-            friends_bb: enemies_bb.mirror(),
-            enemies_bb: friends_bb.mirror(),
-            friends_color: friends_color.opposite(),
-            friends_castle: enemies_castle,
-            enemies_castle: friends_castle,
-            en_passant_target: new_en_passant_target,
-            fullmoves: match friends_color {
-                PlayerColor::White => fullmoves,
-                PlayerColor::Black => fullmoves + 1,
+            pieces: self.pieces.mirror(),
+            friends_bb: self.enemies_bb.mirror(),
+            enemies_bb: self.friends_bb.mirror(),
+            side_to_move: self.side_to_move.opposite(),
+            flags: self.flags,
+            fullmoves: match self.side_to_move {
+                PlayerSide::White => self.fullmoves,
+                PlayerSide::Black => self.fullmoves + 1,
             },
         })
     }
@@ -266,34 +260,33 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
     };
 
     // Pawn regular moves
-    for src in SquareIter(gs.friends_bb[PieceKind::Pawn] & !RankIndex::_7.bb().get()) {
-        let src_bb = src.bb().get();
-        let captures = (lut::shift_ne(src_bb) | lut::shift_nw(src_bb)) & enemies_bb_union;
+    for from in SquareIter(gs.friends_bb[PieceKind::Pawn] & !RankIndex::_7.bb().get()) {
+        let from_bb = from.bb().get();
+        let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
         if JUST_CAPTURES {
-            for dst in SquareIter(captures) {
+            for to in SquareIter(captures) {
                 f(Move {
-                    who: PieceKind::Pawn,
-                    src,
-                    dst,
+                    kind: PieceKind::Pawn,
+                    from,
+                    to,
                     flag: MoveFlag::Normal,
                 })
             }
         } else {
-            let single_push = lut::shift_n(src_bb) & !blockers;
-            for dst in SquareIter(captures | single_push) {
+            let single_push = lut::shift_n(from_bb) & !blockers;
+            for to in SquareIter(captures | single_push) {
                 f(Move {
-                    who: PieceKind::Pawn,
-                    src,
-                    dst,
+                    kind: PieceKind::Pawn,
+                    from,
+                    to,
                     flag: MoveFlag::Normal,
                 })
             }
-            for dst in SquareIter(lut::shift_n(single_push) & !blockers & RankIndex::_4.bb().get())
-            {
+            for to in SquareIter(lut::shift_n(single_push) & !blockers & RankIndex::_4.bb().get()) {
                 f(Move {
-                    who: PieceKind::Pawn,
-                    src,
-                    dst,
+                    kind: PieceKind::Pawn,
+                    from,
+                    to,
                     flag: MoveFlag::DoublePush,
                 })
             }
@@ -301,34 +294,34 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
     }
 
     // Pawn promotions
-    for src in SquareIter(gs.friends_bb[PieceKind::Pawn] & RankIndex::_7.bb().get()) {
+    for from in SquareIter(gs.friends_bb[PieceKind::Pawn] & RankIndex::_7.bb().get()) {
         const PROMOTIONS: [PieceKind; 4] = [
             PieceKind::Queen,
             PieceKind::Knight,
             PieceKind::Bishop,
             PieceKind::Rook,
         ];
-        let src_bb = src.bb().get();
-        let captures = (lut::shift_ne(src_bb) | lut::shift_nw(src_bb)) & enemies_bb_union;
+        let from_bb = from.bb().get();
+        let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
         if JUST_CAPTURES {
-            for dst in SquareIter(captures) {
+            for to in SquareIter(captures) {
                 for prom in PROMOTIONS {
                     f(Move {
-                        who: PieceKind::Pawn,
-                        src,
-                        dst,
+                        kind: PieceKind::Pawn,
+                        from,
+                        to,
                         flag: MoveFlag::Promotion(prom),
                     })
                 }
             }
         } else {
-            let single_push = lut::shift_n(src_bb) & !blockers;
-            for dst in SquareIter(captures | single_push) {
+            let single_push = lut::shift_n(from_bb) & !blockers;
+            for to in SquareIter(captures | single_push) {
                 for prom in PROMOTIONS {
                     f(Move {
-                        who: PieceKind::Pawn,
-                        src,
-                        dst,
+                        kind: PieceKind::Pawn,
+                        from,
+                        to,
                         flag: MoveFlag::Promotion(prom),
                     })
                 }
@@ -337,78 +330,78 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
     }
 
     // Knight moves
-    for src in SquareIter(gs.friends_bb[PieceKind::Knight]) {
-        for dst in SquareIter(knight_reachable(src) & dst_mask) {
+    for from in SquareIter(gs.friends_bb[PieceKind::Knight]) {
+        for to in SquareIter(knight_reachable(from) & dst_mask) {
             f(Move {
-                who: PieceKind::Knight,
-                src,
-                dst,
+                kind: PieceKind::Knight,
+                from,
+                to,
                 flag: MoveFlag::Normal,
             })
         }
     }
 
     // Bishop moves
-    for src in SquareIter(gs.friends_bb[PieceKind::Bishop]) {
-        for dst in SquareIter(bishop_reachable(src, blockers) & dst_mask) {
+    for from in SquareIter(gs.friends_bb[PieceKind::Bishop]) {
+        for to in SquareIter(bishop_reachable(from, blockers) & dst_mask) {
             f(Move {
-                who: PieceKind::Bishop,
-                src,
-                dst,
+                kind: PieceKind::Bishop,
+                from,
+                to,
                 flag: MoveFlag::Normal,
             })
         }
     }
 
     // Rook moves
-    for src in SquareIter(gs.friends_bb[PieceKind::Rook]) {
-        for dst in SquareIter(rook_reachable(src, blockers) & dst_mask) {
+    for from in SquareIter(gs.friends_bb[PieceKind::Rook]) {
+        for to in SquareIter(rook_reachable(from, blockers) & dst_mask) {
             f(Move {
-                who: PieceKind::Rook,
-                src,
-                dst,
+                kind: PieceKind::Rook,
+                from,
+                to,
                 flag: MoveFlag::Normal,
             })
         }
     }
 
     // Queen moves
-    for src in SquareIter(gs.friends_bb[PieceKind::Queen]) {
-        for dst in
-            SquareIter((bishop_reachable(src, blockers) | rook_reachable(src, blockers)) & dst_mask)
-        {
+    for from in SquareIter(gs.friends_bb[PieceKind::Queen]) {
+        for to in SquareIter(
+            (bishop_reachable(from, blockers) | rook_reachable(from, blockers)) & dst_mask,
+        ) {
             f(Move {
-                who: PieceKind::Queen,
-                src,
-                dst,
+                kind: PieceKind::Queen,
+                from,
+                to,
                 flag: MoveFlag::Normal,
             })
         }
     }
 
     // King moves
-    for src in SquareIter(gs.friends_bb[PieceKind::King]) {
-        for dst in SquareIter(king_reachable(src) & dst_mask) {
+    for from in SquareIter(gs.friends_bb[PieceKind::King]) {
+        for to in SquareIter(king_reachable(from) & dst_mask) {
             f(Move {
-                who: PieceKind::King,
-                src,
-                dst,
+                kind: PieceKind::King,
+                from,
+                to,
                 flag: MoveFlag::Normal,
             })
         }
     }
 
     // En passant
-    if let Some(file) = gs.en_passant_target {
-        let dst = SquareIndex::from_coords(file, RankIndex::_6);
-        let dst_bb = dst.bb().get();
+    if let Some(file) = gs.flags.en_passant() {
+        let to = SquareIndex::from_coords(file, RankIndex::_6);
+        let to_bb = to.bb().get();
         let capturers =
-            (lut::shift_se(dst_bb) | lut::shift_sw(dst_bb)) & gs.friends_bb[PieceKind::Pawn];
-        for src in SquareIter(capturers) {
+            (lut::shift_se(to_bb) | lut::shift_sw(to_bb)) & gs.friends_bb[PieceKind::Pawn];
+        for from in SquareIter(capturers) {
             f(Move {
-                who: PieceKind::Pawn,
-                src,
-                dst,
+                kind: PieceKind::Pawn,
+                from,
+                to,
                 flag: MoveFlag::EnPassant,
             })
         }
@@ -416,25 +409,25 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
 
     // Castle
     if !JUST_CAPTURES {
-        if gs.friends_castle.east
+        if gs.flags.castle_east(gs.side_to_move)
             && ((SquareIndex::F1.bb() | SquareIndex::G1.bb()).get() & blockers) == 0
         {
             f(Move {
-                who: PieceKind::King,
-                src: SquareIndex::E1,
-                dst: SquareIndex::G1,
+                kind: PieceKind::King,
+                from: SquareIndex::E1,
+                to: SquareIndex::G1,
                 flag: MoveFlag::CastleEast,
             })
         }
-        if gs.friends_castle.west
+        if gs.flags.castle_west(gs.side_to_move)
             && ((SquareIndex::B1.bb() | SquareIndex::C1.bb() | SquareIndex::D1.bb()).get()
                 & blockers)
                 == 0
         {
             f(Move {
-                who: PieceKind::King,
-                src: SquareIndex::E1,
-                dst: SquareIndex::C1,
+                kind: PieceKind::King,
+                from: SquareIndex::E1,
+                to: SquareIndex::C1,
                 flag: MoveFlag::CastleWest,
             })
         }

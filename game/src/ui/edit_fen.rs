@@ -36,7 +36,7 @@ impl EditFen {
     ) {
         for square in SquareIndex::iter() {
             if let Some((color, kind)) = self.parsed_gamestate.piece(square) {
-                custom_widgets::Piece { kind, color }
+                custom_widgets::Piece { kind, side: color }
                     .render(board_layout.inner(square, layout.board), buf);
             }
         }

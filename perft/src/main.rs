@@ -22,13 +22,13 @@ fn perft(gs: &GameState, depth: u32, parallel: bool, cache: &Cache) -> u32 {
             let value = if parallel {
                 moves
                     .into_par_iter()
-                    .filter_map(|mv| gs.do_move(*mv).ok())
+                    .filter_map(|mv| gs.make_move(*mv).ok())
                     .map(|next_gs| perft(&next_gs, depth - 1, false, cache))
                     .sum()
             } else {
                 moves
                     .into_iter()
-                    .filter_map(|mv| gs.do_move(mv).ok())
+                    .filter_map(|mv| gs.make_move(mv).ok())
                     .map(|next_gs| perft(&next_gs, depth - 1, false, cache))
                     .sum()
             };

@@ -4,7 +4,8 @@ use std::hash::{Hash, Hasher};
 
 use crate::{
     atomic_cell::AtomicCell,
-    game_state::{CastleAvailability, CompactPieceArray, FileIndex, GameState, PlayerColor},
+    game_state::{CompactGameStateFlags, CompactPieceArray, GameState},
+    PlayerSide,
 };
 
 /// Size of a table entry is:
@@ -23,10 +24,8 @@ pub struct TableKey<X> {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct Tag<X> {
     pieces: CompactPieceArray,
-    friends_color: PlayerColor,
-    friends_castle: CastleAvailability,
-    enemies_castle: CastleAvailability,
-    en_passant_target: Option<FileIndex>,
+    side_to_move: PlayerSide,
+    flags: CompactGameStateFlags,
     extra: X,
 }
 
@@ -40,10 +39,8 @@ impl<X: Hash> TableKey<X> {
     pub fn new(gs: &GameState, extra: X) -> TableKey<X> {
         let tag = Tag {
             pieces: gs.pieces,
-            friends_color: gs.friends_color,
-            friends_castle: gs.friends_castle,
-            enemies_castle: gs.enemies_castle,
-            en_passant_target: gs.en_passant_target,
+            side_to_move: gs.side_to_move,
+            flags: gs.flags,
             extra,
         };
         let mut hash = FxHasher::default();

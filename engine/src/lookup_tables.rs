@@ -1,3 +1,39 @@
+use crate::PieceKind;
+
+/// Knight moves from each square (512 bytes)
+pub const KNIGHT_REACHABLE: [u64; 64] = compile_time::generate_knight_lut();
+
+/// King moves from each square (512 bytes)
+pub const KING_REACHABLE: [u64; 64] = compile_time::generate_king_lut();
+
+/// Rays from each square in each direction (4096 bytes)
+pub const RAYS: [Rays; 64] = compile_time::generate_rays_lut();
+
+/// Get the piece-square value table for a kind of piece.
+/// The table is indexed from white's point of view.
+pub fn piece_value_table(kind: PieceKind) -> &'static [i16; 64] {
+    match kind {
+        PieceKind::Pawn => &PAWN_VALUE,
+        PieceKind::Knight => &KNIGHT_VALUE,
+        PieceKind::Bishop => &BISHOP_VALUE,
+        PieceKind::Rook => &ROOK_VALUE,
+        PieceKind::Queen => &QUEEN_VALUE,
+        PieceKind::King => &KING_VALUE,
+    }
+}
+
+/// Get the flat value of a kind of piece
+pub fn piece_value(kind: PieceKind) -> i16 {
+    match kind {
+        PieceKind::Pawn => 100,
+        PieceKind::Knight => 320,
+        PieceKind::Bishop => 330,
+        PieceKind::Rook => 500,
+        PieceKind::Queen => 900,
+        PieceKind::King => 1000,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Rays {
     pub n: u64,
@@ -130,18 +166,9 @@ mod compile_time {
     }
 }
 
-/// Knight moves from each square (512 bytes)
-pub const KNIGHT_REACHABLE: [u64; 64] = compile_time::generate_knight_lut();
-
-/// King moves from each square (512 bytes)
-pub const KING_REACHABLE: [u64; 64] = compile_time::generate_king_lut();
-
-/// Rays from each square in each direction (4096 bytes)
-pub const RAYS: [Rays; 64] = compile_time::generate_rays_lut();
-
 // Piece square tables: https://www.chessprogramming.org/Simplified_Evaluation_Function
 #[rustfmt::skip]
-pub const PAWN_VALUE: [i16; 64] = [
+const PAWN_VALUE: [i16; 64] = [
     0,   0,   0,   0,   0,   0,   0,   0,
     105, 110, 110, 80,  80,  110, 110, 105,
     105, 95,  90,  100, 100, 90,  95,  105,
@@ -152,7 +179,7 @@ pub const PAWN_VALUE: [i16; 64] = [
     0,   0,   0,   0,   0,   0,   0,   0,
 ];
 #[rustfmt::skip]
-pub const KNIGHT_VALUE: [i16; 64] = [
+const KNIGHT_VALUE: [i16; 64] = [
     270, 280, 290, 290, 290, 290, 280, 270,
     280, 300, 320, 325, 325, 320, 300, 280,
     290, 300, 330, 335, 335, 330, 300, 290,
@@ -163,7 +190,7 @@ pub const KNIGHT_VALUE: [i16; 64] = [
     270, 280, 290, 290, 290, 290, 280, 270,
 ];
 #[rustfmt::skip]
-pub const BISHOP_VALUE: [i16; 64] = [
+const BISHOP_VALUE: [i16; 64] = [
     310, 320, 320, 320, 320, 320, 320, 310,
     320, 335, 330, 330, 330, 330, 335, 320,
     320, 340, 340, 340, 340, 340, 340, 320,
@@ -174,7 +201,7 @@ pub const BISHOP_VALUE: [i16; 64] = [
     310, 320, 320, 320, 320, 320, 320, 310,    
 ];
 #[rustfmt::skip]
-pub const ROOK_VALUE: [i16; 64] = [
+const ROOK_VALUE: [i16; 64] = [
     500, 500, 500, 505, 505, 500, 500, 500,
     495, 500, 500, 500, 500, 500, 500, 495,
     495, 500, 500, 500, 500, 500, 500, 495,
@@ -185,7 +212,7 @@ pub const ROOK_VALUE: [i16; 64] = [
     500, 500, 500, 500, 500, 500, 500, 500,
 ];
 #[rustfmt::skip]
-pub const QUEEN_VALUE: [i16; 64] = [
+const QUEEN_VALUE: [i16; 64] = [
     880, 890, 890, 885, 885, 890, 890, 880,
     890, 900, 905, 900, 900, 900, 900, 890,
     890, 905, 905, 905, 905, 905, 900, 890,
@@ -196,7 +223,7 @@ pub const QUEEN_VALUE: [i16; 64] = [
     880, 890, 890, 900, 900, 890, 890, 880,
 ];
 #[rustfmt::skip]
-pub const KING_VALUE: [i16; 64] = [
+const KING_VALUE: [i16; 64] = [
     1020, 1030, 1010, 1000, 1000, 1010, 1030, 1020,
     1020, 1020, 1000, 1000, 1000, 1000, 1020, 1020,
     990,  980,  980,  980,  980,  980,  980,  990,

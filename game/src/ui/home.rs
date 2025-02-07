@@ -1,4 +1,4 @@
-use engine::{GameState, MoveFlag, PieceKind, PlayerColor, ScoreInfo, Search, SquareIndex};
+use engine::{GameState, MoveFlag, PieceKind, PlayerSide, ScoreInfo, Search, SquareIndex};
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{Event, KeyCode},
@@ -155,7 +155,7 @@ impl Home {
     ) {
         for square in SquareIndex::iter() {
             if let Some((color, kind)) = self.gamestate.current().piece(square) {
-                custom_widgets::Piece { kind, color }
+                custom_widgets::Piece { kind, side: color }
                     .render(board_layout.inner(square, layout.board), buf);
             }
         }
@@ -176,14 +176,14 @@ impl Home {
         let moves_before = self.gamestate.moves_before().iter();
         let moves_after = self.gamestate.moves_after().iter();
         for (i, mv) in moves_before.chain(moves_after).enumerate() {
-            if i == 0 && mv.player == PlayerColor::Black {
+            if i == 0 && mv.player == PlayerSide::Black {
                 text.push_word(format!("{}.", mv.number).set_style(style).reversed());
                 text.push_word("..");
             }
             if i == self.gamestate.moves_before().len() {
                 style = style.fg(Color::Red) // Change the style for moves after
             }
-            if mv.player == PlayerColor::White {
+            if mv.player == PlayerSide::White {
                 text.push_word(format!("{}.", mv.number).set_style(style).reversed());
             }
             text.push_word(format!("{}", mv).set_style(style));
@@ -224,7 +224,7 @@ impl Home {
             ScoreInfo::Win(x) => (format!("M{x}"), 1.0),
             ScoreInfo::Loose(x) => (format!("-M{x}"), 0.0),
         };
-        if self.gamestate.current().active_color() == PlayerColor::Black {
+        if self.gamestate.current().side_to_move() == PlayerSide::Black {
             gauge_ratio = 1.0 - gauge_ratio;
         }
         Gauge::default()
@@ -265,16 +265,16 @@ impl Home {
             .bg(style::color::BLACK_PIECE)
             .fg(style::color::WHITE_PIECE);
         let (text, block) = match (
-            self.gamestate.current().active_color(),
+            self.gamestate.current().side_to_move(),
             self.gamestate.current().is_check(),
             self.gamestate.available_moves().is_empty(),
         ) {
-            (PlayerColor::White, true, true) => ("Black won the game!", black_block),
-            (PlayerColor::Black, true, true) => ("White won the game!", white_block),
-            (PlayerColor::White, false, true) => ("Stalemate!", white_block),
-            (PlayerColor::Black, false, true) => ("Stalemate!", black_block),
-            (PlayerColor::White, _, false) => ("White to move", white_block),
-            (PlayerColor::Black, _, false) => ("Black to move", black_block),
+            (PlayerSide::White, true, true) => ("Black won the game!", black_block),
+            (PlayerSide::Black, true, true) => ("White won the game!", white_block),
+            (PlayerSide::White, false, true) => ("Stalemate!", white_block),
+            (PlayerSide::Black, false, true) => ("Stalemate!", black_block),
+            (PlayerSide::White, _, false) => ("White to move", white_block),
+            (PlayerSide::Black, _, false) => ("Black to move", black_block),
         };
         Paragraph::new(text)
             .centered()
