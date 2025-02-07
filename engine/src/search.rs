@@ -176,7 +176,7 @@ fn eval_minmax(
     stats: &mut SearchStatistics,
 ) -> Result<(Score, Option<Move>), SearchInterrupted> {
     if depth == 0 {
-        return Ok((eval_quiescent(gs, alpha, beta, stop, table, stats)?, None));
+        return Ok((eval_quiescent(gs, alpha, beta, stop, stats)?, None));
     }
     if stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
@@ -267,22 +267,11 @@ fn eval_quiescent(
     mut alpha: Score,
     beta: Score,
     stop: &AtomicBool,
-    table: &Table<(), TableValue>,
     stats: &mut SearchStatistics,
 ) -> Result<Score, SearchInterrupted> {
     if stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
-
-    // Lookup in the table
-    let table_key = TableKey::new(gs, ());
-    match table.lookup(&table_key) {
-        Some(e) if e.depth == 0 => {
-            stats.table_hits += 1;
-            return Ok(e.score);
-        }
-        _ => {}
-    };
 
     // In quiescence search, don't forget to consider that we can stop capturing anytime!
     // (Actually not anytime, there might be forced captures, but rarely)
@@ -306,7 +295,7 @@ fn eval_quiescent(
         let Ok(next_gs) = gs.make_move(mv) else {
             continue; // Illegal move
         };
-        let branch_score = -eval_quiescent(&next_gs, -beta, -alpha, stop, table, stats)?;
+        let branch_score = -eval_quiescent(&next_gs, -beta, -alpha, stop, stats)?;
         score = score.max(branch_score);
         alpha = alpha.max(score);
         if alpha >= beta {
@@ -314,14 +303,6 @@ fn eval_quiescent(
         }
     }
 
-    let table_value = TableValue {
-        depth: 0,
-        score,
-        best_move: None,
-    };
-    if table.update(table_key, table_value) {
-        stats.table_rewrites += 1;
-    }
     Ok(score)
 }
 
