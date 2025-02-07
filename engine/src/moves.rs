@@ -176,6 +176,7 @@ impl GameState {
                 PlayerSide::White => self.fullmoves,
                 PlayerSide::Black => self.fullmoves + 1,
             },
+            material_value: -self.material_value,
         })
     }
 

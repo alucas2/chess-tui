@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Size of a table entry is:
-/// `8 + 38 + size_of::<X> + size_of::<V>`
+/// `8 + 34 + size_of::<X> + size_of::<V>`
 /// Where 8 corresponds to the size of the seqlock and 106 the size of the gamestate
 pub struct Table<X, V> {
     entries: Vec<AtomicCell<Option<Entry<X, V>>>>,
@@ -20,7 +20,7 @@ pub struct TableKey<X> {
     hash: u64,
 }
 
-/// size is at least: 38 + sizeof::<X>
+/// size is at least: 34 + sizeof::<X>
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct Tag<X> {
     pieces: CompactPieceArray,

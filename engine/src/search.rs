@@ -8,7 +8,7 @@ use std::{
 
 use smallvec::SmallVec;
 
-use crate::{lookup_tables as lut, GameState, Move, PieceKind, SquareIter, Table, TableKey};
+use crate::{GameState, Move, Table, TableKey};
 
 /// Handle to the search thread
 pub struct Search {
@@ -327,16 +327,17 @@ fn eval_quiescent(
 
 /// Evaluate a position with a fast heuristic
 fn eval_heuristic(gs: &GameState) -> Score {
-    let mut score = 0;
-    for kind in PieceKind::iter() {
-        // Sum the friend material
-        for sq in SquareIter(gs.friends_bb[kind]) {
-            score += lut::piece_value_table(kind)[sq as usize];
-        }
-        // Subtract the enemy material
-        for sq in SquareIter(gs.enemies_bb[kind]) {
-            score -= lut::piece_value_table(kind)[sq.mirror() as usize];
-        }
-    }
-    Score(score)
+    Score(gs.material_value)
+    // let mut score = 0;
+    // for kind in PieceKind::iter() {
+    //     // Sum the friend material
+    //     for sq in SquareIter(gs.friends_bb[kind]) {
+    //         score += lut::piece_value_table(kind)[sq as usize];
+    //     }
+    //     // Subtract the enemy material
+    //     for sq in SquareIter(gs.enemies_bb[kind]) {
+    //         score -= lut::piece_value_table(kind)[sq.mirror() as usize];
+    //     }
+    // }
+    // Score(score)
 }
