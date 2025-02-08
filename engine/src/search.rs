@@ -1,7 +1,7 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, LazyLock, RwLock,
     },
     thread,
 };
@@ -12,8 +12,9 @@ use crate::{GameState, Move, Table, TableKey};
 
 /// Handle to the search thread
 pub struct Search {
-    status: Arc<RwLock<SearchStatus>>,
+    result: Arc<SearchResultCell>,
     stop: Arc<AtomicBool>,
+    stats: Arc<RwLock<SearchStatistics>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -22,7 +23,7 @@ pub struct Search {
 pub struct SearchStatus {
     /// Indicates if the search thread is still running
     pub thinking: bool,
-    /// Depth of the latest search iteration
+    /// Depth of the search that gave the current result
     pub depth: u16,
     /// Score assigned to the searched position
     pub score: ScoreInfo,
@@ -54,6 +55,18 @@ pub struct SearchStatistics {
     pub table_rewrites: u64,
 }
 
+/// Value that is updated during the search with the best move found so far
+#[derive(Debug, Clone, Copy)]
+struct SearchResult {
+    depth: u16,
+    score: Score,
+    best: Option<Move>,
+}
+
+/// Shared container for a search result
+#[derive(Debug)]
+struct SearchResultCell(AtomicU64);
+
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
 /// Score::NEG_INF acts like "negative infinity", which is a placeholder invalid score.
@@ -61,92 +74,75 @@ pub struct SearchStatistics {
 #[repr(transparent)]
 struct Score(i16);
 
-impl Score {
-    const ZERO: Score = Score(0);
-    const MAX: Score = Score(i16::MAX);
-    const MIN: Score = Score(-i16::MAX);
-    const NEG_INF: Score = Score(i16::MIN);
-}
-
-impl std::ops::Neg for Score {
-    type Output = Score;
-
-    fn neg(self) -> Self::Output {
-        Score(-self.0)
-    }
-}
-
 /// Values that are stored in the table.
-/// Its size should not exceed 14 bytes to fit within a table entry
+/// Its size should not be excessive to fit within a table entry
 #[derive(Clone, Copy)]
 struct TableValue {
-    /// depth zero means quiescent search
     depth: u16,
     score: Score,
-    best_move: Option<Move>,
+    best: Option<Move>,
 }
 
-static TABLE: OnceLock<Table<(), TableValue>> = OnceLock::new();
 const TABLE_NUM_ENTRIES: usize = 2_usize.pow(22);
+static TABLE: LazyLock<Table<(), TableValue>> = LazyLock::new(|| Table::new(TABLE_NUM_ENTRIES));
 
 impl Search {
     pub fn start(gs: GameState) -> Self {
-        let table = TABLE.get_or_init(|| Table::new(TABLE_NUM_ENTRIES));
-        let status = Arc::new(RwLock::new(SearchStatus {
-            thinking: true,
-            depth: 0,
-            score: ScoreInfo::Normal(0),
+        let result = Arc::new(SearchResultCell::new(SearchResult {
+            depth: 1,
+            score: Score::ZERO,
             best: None,
-            stats: SearchStatistics::default(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(RwLock::new(SearchStatistics::default()));
         let handle = {
-            let status = Arc::clone(&status);
+            let result = Arc::clone(&result);
             let stop = Arc::clone(&stop);
+            let stats = Arc::clone(&stats);
             thread::spawn(move || {
                 // Iterative deepening
                 for depth in 1..=20 {
-                    let mut stats = SearchStatistics::default();
-                    let result = eval_minmax(
+                    let mut new_stats = SearchStatistics::default();
+                    let Ok(final_score) = eval_minmax(
                         &gs,
                         Score::MIN,
                         Score::MAX,
                         depth,
                         &stop,
-                        &table,
-                        &mut stats,
-                    );
-                    let Ok((score, best)) = result else {
-                        break;
+                        &TABLE,
+                        &mut new_stats,
+                        Some(&result),
+                    ) else {
+                        break; // Search has been interrupted
                     };
-                    let score = match score {
-                        Score::MIN => ScoreInfo::Loose(depth - 1),
-                        Score::MAX => ScoreInfo::Win(depth - 1),
-                        _ => ScoreInfo::Normal(score.0),
-                    };
-                    *status.write().unwrap() = SearchStatus {
-                        thinking: true,
-                        depth,
-                        score,
-                        best,
-                        stats,
-                    };
-                    if matches!(score, ScoreInfo::Loose(_) | ScoreInfo::Win(_)) {
-                        break; // Stop deepening when a move is found
+                    *stats.write().unwrap() = new_stats;
+                    if final_score == Score::MIN || final_score == Score::MAX {
+                        break; // Stop deepening when a checkmate is found
                     }
                 }
-                status.write().unwrap().thinking = false;
             })
         };
         Search {
-            status,
+            result,
             stop,
+            stats,
             handle: Some(handle),
         }
     }
 
     pub fn status(&self) -> SearchStatus {
-        self.status.read().unwrap().clone()
+        let result = self.result.load();
+        SearchStatus {
+            thinking: self.handle.as_ref().is_some_and(|h| !h.is_finished()),
+            depth: result.depth,
+            score: match result.score {
+                Score::MAX => ScoreInfo::Win(result.depth - 1),
+                Score::MIN => ScoreInfo::Loose(result.depth - 1),
+                Score(x) => ScoreInfo::Normal(x),
+            },
+            best: result.best,
+            stats: self.stats.read().unwrap().clone(),
+        }
     }
 }
 
@@ -174,9 +170,10 @@ fn eval_minmax(
     stop: &AtomicBool,
     table: &Table<(), TableValue>,
     stats: &mut SearchStatistics,
-) -> Result<(Score, Option<Move>), SearchInterrupted> {
+    argmax: Option<&SearchResultCell>,
+) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
-        return Ok((eval_quiescent(gs, alpha, beta, stop, stats)?, None));
+        return Ok(eval_quiescent(gs, alpha, beta, stop, stats)?);
     }
     if stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
@@ -187,22 +184,38 @@ fn eval_minmax(
     let move_to_try_first = match table.lookup(&table_key) {
         Some(e) if e.depth == depth => {
             stats.table_hits += 1;
-            return Ok((e.score, e.best_move));
+            if let Some(argmax) = argmax {
+                // Update the search result
+                argmax.store(SearchResult {
+                    depth,
+                    score: e.score,
+                    best: e.best,
+                });
+            }
+            return Ok(e.score);
         }
-        Some(e) => e.best_move,
+        Some(e) => e.best,
         None => None,
     };
 
     let mut score = Score::NEG_INF;
-    let mut best_move = None;
+    let mut best = None;
     'cutoff: {
         // Try the cached move first to raise the alpha bound
         if let Some(mv) = move_to_try_first {
             let next_gs = gs.make_move(mv).expect("Move to try first should be legal");
             let branch_score =
-                -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats)?.0;
+                -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats, None)?;
             if branch_score > score {
-                best_move = Some(mv)
+                best = Some(mv);
+                if let Some(argmax) = argmax {
+                    // Update the search result
+                    argmax.store(SearchResult {
+                        depth,
+                        score: branch_score,
+                        best,
+                    });
+                }
             }
             score = score.max(branch_score);
             alpha = alpha.max(score);
@@ -229,9 +242,17 @@ fn eval_minmax(
                 continue; // Illegal move
             };
             let branch_score =
-                -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats)?.0;
+                -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats, None)?;
             if branch_score > score {
-                best_move = Some(mv)
+                best = Some(mv);
+                if let Some(argmax) = argmax {
+                    // Update the search result
+                    argmax.store(SearchResult {
+                        depth,
+                        score: branch_score,
+                        best,
+                    });
+                }
             }
             score = score.max(branch_score);
             alpha = alpha.max(score);
@@ -250,15 +271,11 @@ fn eval_minmax(
         }
     }
 
-    let table_value = TableValue {
-        depth,
-        score,
-        best_move,
-    };
+    let table_value = TableValue { depth, score, best };
     if table.update(table_key, table_value) {
         stats.table_rewrites += 1;
     }
-    Ok((score, best_move))
+    Ok(score)
 }
 
 /// Evaluate a position by quiescent search
@@ -321,4 +338,38 @@ fn eval_heuristic(gs: &GameState) -> Score {
     //     }
     // }
     // Score(score)
+}
+
+impl Score {
+    const ZERO: Score = Score(0);
+    const MAX: Score = Score(i16::MAX);
+    const MIN: Score = Score(-i16::MAX);
+    const NEG_INF: Score = Score(i16::MIN);
+}
+
+impl std::ops::Neg for Score {
+    type Output = Score;
+
+    fn neg(self) -> Self::Output {
+        Score(-self.0)
+    }
+}
+
+impl SearchResultCell {
+    fn new(value: SearchResult) -> SearchResultCell {
+        let value = unsafe { std::mem::transmute(value) };
+        SearchResultCell(AtomicU64::new(value))
+    }
+
+    fn store(&self, value: SearchResult) {
+        let value = unsafe { std::mem::transmute(value) };
+        self.0.store(value, Ordering::Relaxed)
+    }
+
+    fn load(&self) -> SearchResult {
+        // Safety: in the functions `new` and `store`, we guarantee that
+        // the atomic contains a valid SearchResult
+        let value = self.0.load(Ordering::Relaxed);
+        unsafe { std::mem::transmute(value) }
+    }
 }
