@@ -161,6 +161,16 @@ struct MoveWithKey {
     key: i16,
 }
 
+/// An iterator over the banches of a gamestate.
+/// - the first call to `next` will return the table move if provided,
+/// - the remaining calls to `next` will lazily generate and return the rest of the moves
+struct BranchIterator<'a, A: smallvec::Array<Item = MoveWithKey>> {
+    gs: &'a GameState,
+    table_move: Option<Move>,
+    table_move_taken: bool,
+    generated_moves: Option<SmallVec<A>>,
+}
+
 /// Evaluate a position with a minmax search
 fn eval_minmax(
     gs: &GameState,
@@ -181,7 +191,7 @@ fn eval_minmax(
 
     // Lookup in the table
     let table_key = TableKey::new(gs, ());
-    let move_to_try_first = match table.lookup(&table_key) {
+    let table_move = match table.lookup(&table_key) {
         Some(e) if e.depth == depth => {
             stats.table_hits += 1;
             if let Some(argmax) = argmax {
@@ -200,65 +210,28 @@ fn eval_minmax(
 
     let mut score = Score::NEG_INF;
     let mut best = None;
-    'cutoff: {
-        // Try the cached move first to raise the alpha bound
-        if let Some(mv) = move_to_try_first {
-            let next_gs = gs.make_move(mv).expect("Move to try first should be legal");
-            let branch_score =
-                -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats, None)?;
-            if branch_score > score {
-                best = Some(mv);
-                if let Some(argmax) = argmax {
-                    // Update the search result
-                    argmax.store(SearchResult {
-                        depth,
-                        score: branch_score,
-                        best,
-                    });
-                }
-            }
-            score = score.max(branch_score);
-            alpha = alpha.max(score);
-            if alpha >= beta {
-                break 'cutoff;
+
+    // Pop and explore the branches, starting from the most promising
+    stats.expanded_nodes += 1;
+    let mut branches = BranchIterator::new(gs, table_move);
+    while let Some((mv, next_gs)) = branches.next(generate_moves) {
+        let branch_score =
+            -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats, None)?;
+        if branch_score > score {
+            best = Some(mv);
+            if let Some(argmax) = argmax {
+                // Update the search result
+                argmax.store(SearchResult {
+                    depth,
+                    score: branch_score,
+                    best,
+                });
             }
         }
-
-        // Generate the moves and assign them a score
-        stats.expanded_nodes += 1;
-        let mut moves = SmallVec::<[_; 64]>::new();
-        gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
-        for MoveWithKey { mv, key } in moves.iter_mut() {
-            *key = gs.eval_move(*mv);
-        }
-
-        // Pop and explore the branches, starting from the most promising
-        while let Some((index_max, _)) = moves.iter().enumerate().max_by_key(|(_, x)| x.key) {
-            let mv = moves.swap_remove(index_max).mv;
-            if Some(mv) == move_to_try_first {
-                continue; // Already explored the first move
-            }
-            let Ok(next_gs) = gs.make_move(mv) else {
-                continue; // Illegal move
-            };
-            let branch_score =
-                -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats, None)?;
-            if branch_score > score {
-                best = Some(mv);
-                if let Some(argmax) = argmax {
-                    // Update the search result
-                    argmax.store(SearchResult {
-                        depth,
-                        score: branch_score,
-                        best,
-                    });
-                }
-            }
-            score = score.max(branch_score);
-            alpha = alpha.max(score);
-            if alpha >= beta {
-                break 'cutoff;
-            }
+        score = score.max(branch_score);
+        alpha = alpha.max(score);
+        if alpha >= beta {
+            break;
         }
     }
 
@@ -300,15 +273,10 @@ fn eval_quiescent(
 
     // Generate the captures and assign them a score
     stats.expanded_nodes_quiescent += 1;
-    let mut moves = SmallVec::<[_; 16]>::new();
-    gs.pseudo_legal_captures(|mv| moves.push(MoveWithKey { mv, key: 0 }));
-    for MoveWithKey { mv, key } in moves.iter_mut() {
-        *key = gs.eval_move(*mv);
-    }
+    let mut moves = generate_moves_quiescent(gs);
 
     // Pop and explore the branches, starting from the most promising
-    while let Some((index_max, _)) = moves.iter().enumerate().max_by_key(|(_, x)| x.key) {
-        let mv = moves.swap_remove(index_max).mv;
+    while let Some(mv) = take_highest_move(&mut moves) {
         let Ok(next_gs) = gs.make_move(mv) else {
             continue; // Illegal move
         };
@@ -326,18 +294,31 @@ fn eval_quiescent(
 /// Evaluate a position with a fast heuristic
 fn eval_heuristic(gs: &GameState) -> Score {
     Score(gs.material_value)
-    // let mut score = 0;
-    // for kind in PieceKind::iter() {
-    //     // Sum the friend material
-    //     for sq in SquareIter(gs.friends_bb[kind]) {
-    //         score += lut::piece_value_table(kind)[sq as usize];
-    //     }
-    //     // Subtract the enemy material
-    //     for sq in SquareIter(gs.enemies_bb[kind]) {
-    //         score -= lut::piece_value_table(kind)[sq.mirror() as usize];
-    //     }
-    // }
-    // Score(score)
+}
+
+fn generate_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 64]> {
+    let mut moves = SmallVec::new();
+    gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
+    for MoveWithKey { mv, key } in moves.iter_mut() {
+        *key = gs.eval_move(*mv);
+    }
+    moves
+}
+
+fn generate_moves_quiescent(gs: &GameState) -> SmallVec<[MoveWithKey; 16]> {
+    let mut moves = SmallVec::new();
+    gs.pseudo_legal_captures(|mv| moves.push(MoveWithKey { mv, key: 0 }));
+    for MoveWithKey { mv, key } in moves.iter_mut() {
+        *key = gs.eval_move(*mv);
+    }
+    moves
+}
+
+fn take_highest_move<A: smallvec::Array<Item = MoveWithKey>>(
+    moves: &mut SmallVec<A>,
+) -> Option<Move> {
+    let (index, _) = moves.iter().enumerate().max_by_key(|(_, mv)| mv.key)?;
+    Some(moves.swap_remove(index).mv)
 }
 
 impl Score {
@@ -371,5 +352,41 @@ impl SearchResultCell {
         // the atomic contains a valid SearchResult
         let value = self.0.load(Ordering::Relaxed);
         unsafe { std::mem::transmute(value) }
+    }
+}
+
+impl<'a, A: smallvec::Array<Item = MoveWithKey>> BranchIterator<'a, A> {
+    pub fn new(gs: &'a GameState, table_move: Option<Move>) -> Self {
+        BranchIterator {
+            gs,
+            table_move,
+            table_move_taken: false,
+            generated_moves: None,
+        }
+    }
+
+    pub fn next<F: FnOnce(&GameState) -> SmallVec<A>>(
+        &mut self,
+        f: F,
+    ) -> Option<(Move, GameState)> {
+        match (self.table_move, self.table_move_taken) {
+            (Some(mv), false) => {
+                self.table_move_taken = true;
+                let next_gs = self.gs.make_move(mv).expect("Table move should be legal");
+                Some((mv, next_gs))
+            }
+            _ => {
+                let generated_moves = self.generated_moves.get_or_insert_with(|| f(self.gs));
+                loop {
+                    let mv = take_highest_move(generated_moves)?;
+                    if Some(mv) == self.table_move {
+                        continue;
+                    }
+                    if let Ok(next_gs) = self.gs.make_move(mv) {
+                        break Some((mv, next_gs));
+                    }
+                }
+            }
+        }
     }
 }
