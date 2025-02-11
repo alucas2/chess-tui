@@ -60,24 +60,24 @@ mod unparse {
     }
 
     fn castle_availability(gs: &GameState, result: &mut String) {
-        if !(gs.castle_east(PlayerSide::White)
-            || gs.castle_west(PlayerSide::White)
-            || gs.castle_east(PlayerSide::Black)
-            || gs.castle_west(PlayerSide::Black))
+        if gs.castle(PlayerSide::White).east().is_none()
+            && gs.castle(PlayerSide::White).west().is_none()
+            && gs.castle(PlayerSide::Black).east().is_none()
+            && gs.castle(PlayerSide::Black).west().is_none()
         {
             result.push('-');
         } else {
-            if gs.castle_east(PlayerSide::White) {
-                result.push('K');
+            if let Some(x) = gs.castle(PlayerSide::White).east() {
+                result.push(x.label().to_ascii_uppercase());
             }
-            if gs.castle_west(PlayerSide::White) {
-                result.push('Q');
+            if let Some(x) = gs.castle(PlayerSide::White).west() {
+                result.push(x.label().to_ascii_uppercase());
             }
-            if gs.castle_east(PlayerSide::Black) {
-                result.push('k');
+            if let Some(x) = gs.castle(PlayerSide::Black).east() {
+                result.push(x.label().to_ascii_lowercase());
             }
-            if gs.castle_west(PlayerSide::Black) {
-                result.push('q');
+            if let Some(x) = gs.castle(PlayerSide::Black).west() {
+                result.push(x.label().to_ascii_lowercase());
             }
         }
     }
@@ -184,11 +184,40 @@ mod parse {
         if s != "-" {
             for char in s.chars() {
                 match char {
-                    'K' => gs.set_castle_east(PlayerSide::White, true),
-                    'Q' => gs.set_castle_west(PlayerSide::White, true),
-                    'k' => gs.set_castle_east(PlayerSide::Black, true),
-                    'q' => gs.set_castle_west(PlayerSide::Black, true),
-                    _ => return Err(ParseError),
+                    'K' => gs
+                        .castle_mut(PlayerSide::White)
+                        .set_east(Some(FileIndex::H)),
+                    'Q' => gs
+                        .castle_mut(PlayerSide::White)
+                        .set_west(Some(FileIndex::A)),
+                    'k' => gs
+                        .castle_mut(PlayerSide::Black)
+                        .set_east(Some(FileIndex::H)),
+                    'q' => gs
+                        .castle_mut(PlayerSide::Black)
+                        .set_west(Some(FileIndex::A)),
+                    c => match FileIndex::parse(c.to_ascii_lowercase()) {
+                        Some(file) => {
+                            let side = if c.is_ascii_uppercase() {
+                                PlayerSide::White
+                            } else {
+                                PlayerSide::Black
+                            };
+                            if let Some((king_file, _)) = SquareIndex::iter()
+                                .find(|sq| gs.piece(*sq) == Some((side, PieceKind::King)))
+                                .map(|sq| sq.coords())
+                            {
+                                if (file as u8) < (king_file as u8) {
+                                    gs.castle_mut(side).set_west(Some(file));
+                                } else if (file as u8) > (king_file as u8) {
+                                    gs.castle_mut(side).set_east(Some(file));
+                                }
+                            } else {
+                                return Err(ParseError);
+                            }
+                        }
+                        None => return Err(ParseError),
+                    },
                 }
             }
         }

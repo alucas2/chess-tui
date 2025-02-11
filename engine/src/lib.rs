@@ -154,6 +154,20 @@ impl FileIndex {
         })
     }
 
+    pub fn from_u8(x: u8) -> Option<FileIndex> {
+        Some(match x {
+            0 => FileIndex::A,
+            1 => FileIndex::B,
+            2 => FileIndex::C,
+            3 => FileIndex::D,
+            4 => FileIndex::E,
+            5 => FileIndex::F,
+            6 => FileIndex::G,
+            7 => FileIndex::H,
+            _ => return None,
+        })
+    }
+
     // pub(crate) const fn bb(self) -> NonZeroU64 {
     //     // Safety: self is in 0..=7 so 'bb' is non zero
     //     let bb = 0x0101010101010101 << (self as u8);

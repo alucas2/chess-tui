@@ -15,8 +15,12 @@ pub struct GameState {
     pub(crate) enemies_bb: PieceBitboards,
     /// Color of the player to move
     pub(crate) side_to_move: PlayerSide,
-    /// Castle rights and en passant
-    pub(crate) flags: CompactGameStateFlags,
+    /// Castle rights of the friends
+    pub(crate) friends_castle: CastleRights,
+    /// Castle rights of the enemies
+    pub(crate) enemies_castle: CastleRights,
+    /// File of the potential en passant capture
+    pub(crate) en_passant: Option<FileIndex>,
     /// Number of full moves, incremented after black has played
     pub(crate) fullmoves: u16,
     /// Evaluation of the material on the board, from the pov of the side to move
@@ -34,7 +38,7 @@ pub(crate) struct CompactPieceArray([u64; 4]);
 
 /// Compact representation of various gamestate flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct CompactGameStateFlags(u8);
+pub struct CastleRights(u8);
 
 impl GameState {
     pub fn piece(&self, square: SquareIndex) -> Option<(PlayerSide, PieceKind)> {
@@ -69,35 +73,37 @@ impl GameState {
                 friends_bb: self.enemies_bb.mirror(),
                 enemies_bb: self.friends_bb.mirror(),
                 side_to_move: self.side_to_move.opposite(),
-                flags: self.flags,
+                friends_castle: self.enemies_castle,
+                enemies_castle: self.friends_castle,
+                en_passant: self.en_passant,
                 fullmoves: self.fullmoves,
                 material_value: -self.material_value,
             }
         }
     }
 
-    pub fn castle_east(&self, side: PlayerSide) -> bool {
-        self.flags.castle_east(side)
+    pub fn castle(&self, side: PlayerSide) -> &CastleRights {
+        if side == self.side_to_move {
+            &self.friends_castle
+        } else {
+            &self.enemies_castle
+        }
     }
 
-    pub fn castle_west(&self, side: PlayerSide) -> bool {
-        self.flags.castle_west(side)
-    }
-
-    pub fn set_castle_east(&mut self, side: PlayerSide, value: bool) {
-        self.flags.set_castle_east(side, value)
-    }
-
-    pub fn set_castle_west(&mut self, side: PlayerSide, value: bool) {
-        self.flags.set_castle_west(side, value)
+    pub fn castle_mut(&mut self, side: PlayerSide) -> &mut CastleRights {
+        if side == self.side_to_move {
+            &mut self.friends_castle
+        } else {
+            &mut self.enemies_castle
+        }
     }
 
     pub fn en_passant_target(&self) -> Option<FileIndex> {
-        self.flags.en_passant()
+        self.en_passant
     }
 
     pub fn set_en_passant_target(&mut self, value: Option<FileIndex>) {
-        self.flags.set_en_passant(value);
+        self.en_passant = value
     }
 
     pub fn fullmoves(&self) -> u16 {
@@ -220,71 +226,33 @@ impl CompactPieceArray {
     }
 }
 
-impl Default for CompactGameStateFlags {
+impl Default for CastleRights {
     fn default() -> Self {
         // En passant is all 1 to represent the absence of it
-        CompactGameStateFlags(0b11110000)
+        CastleRights(0b11111111)
     }
 }
 
-impl CompactGameStateFlags {
-    const WHITE_CASTLE_WEST: u8 = 1 << 0;
-    const WHITE_CASTLE_EAST: u8 = 1 << 1;
-    const BLACK_CASTLE_WEST: u8 = 1 << 2;
-    const BLACK_CASTLE_EAST: u8 = 1 << 3;
-    const EN_PASSANT_SHIFT: u32 = 4;
+impl CastleRights {
+    pub fn east(&self) -> Option<FileIndex> {
+        FileIndex::from_u8(self.0 & 0b00001111)
+    }
 
-    pub(crate) fn castle_east(&self, side: PlayerSide) -> bool {
-        match side {
-            PlayerSide::White => self.0 & Self::WHITE_CASTLE_EAST != 0,
-            PlayerSide::Black => self.0 & Self::BLACK_CASTLE_EAST != 0,
+    pub fn west(&self) -> Option<FileIndex> {
+        FileIndex::from_u8(self.0 >> 4)
+    }
+
+    pub fn set_east(&mut self, value: Option<FileIndex>) {
+        match value {
+            Some(file) => self.0 = (self.0 & 0b11110000) | file as u8,
+            None => self.0 = (self.0 & 0b11110000) | 0b00001111,
         }
     }
 
-    pub(crate) fn castle_west(&self, side: PlayerSide) -> bool {
-        match side {
-            PlayerSide::White => self.0 & Self::WHITE_CASTLE_WEST != 0,
-            PlayerSide::Black => self.0 & Self::BLACK_CASTLE_WEST != 0,
-        }
-    }
-
-    pub(crate) fn set_castle_east(&mut self, side: PlayerSide, value: bool) {
-        match (side, value) {
-            (PlayerSide::White, true) => self.0 |= Self::WHITE_CASTLE_EAST,
-            (PlayerSide::Black, true) => self.0 |= Self::BLACK_CASTLE_EAST,
-            (PlayerSide::White, false) => self.0 &= !Self::WHITE_CASTLE_EAST,
-            (PlayerSide::Black, false) => self.0 &= !Self::BLACK_CASTLE_EAST,
-        }
-    }
-
-    pub(crate) fn set_castle_west(&mut self, side: PlayerSide, value: bool) {
-        match (side, value) {
-            (PlayerSide::White, true) => self.0 |= Self::WHITE_CASTLE_WEST,
-            (PlayerSide::Black, true) => self.0 |= Self::BLACK_CASTLE_WEST,
-            (PlayerSide::White, false) => self.0 &= !Self::WHITE_CASTLE_WEST,
-            (PlayerSide::Black, false) => self.0 &= !Self::BLACK_CASTLE_WEST,
-        }
-    }
-
-    pub(crate) fn en_passant(&self) -> Option<FileIndex> {
-        match self.0 >> Self::EN_PASSANT_SHIFT {
-            0 => Some(FileIndex::A),
-            1 => Some(FileIndex::B),
-            2 => Some(FileIndex::C),
-            3 => Some(FileIndex::D),
-            4 => Some(FileIndex::E),
-            5 => Some(FileIndex::F),
-            6 => Some(FileIndex::G),
-            7 => Some(FileIndex::H),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn set_en_passant(&mut self, value: Option<FileIndex>) {
-        let mask = 0b1111;
-        self.0 |= mask << Self::EN_PASSANT_SHIFT;
-        if let Some(file) = value {
-            self.0 ^= (mask ^ file as u8) << Self::EN_PASSANT_SHIFT
+    pub fn set_west(&mut self, value: Option<FileIndex>) {
+        match value {
+            Some(file) => self.0 = (self.0 & 0b00001111) | (file as u8) << 4,
+            None => self.0 = (self.0 & 0b00001111) | 0b11110000,
         }
     }
 }
