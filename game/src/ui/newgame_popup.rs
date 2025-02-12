@@ -36,6 +36,10 @@ impl IState for NewGamePopup {
                     return State::Running(Box::new(Home::new(gs)));
                 }
                 Some(1) => {
+                    let gs = fen::random_chess960_position();
+                    return State::Running(Box::new(Home::new(gs)));
+                }
+                Some(2) => {
                     let gs = *self.home.current();
                     return State::Running(Box::new(EditFen::new(self, gs)));
                 }
@@ -56,10 +60,10 @@ impl IState for NewGamePopup {
 
     fn draw(&mut self, layout: &UiLayout, buf: &mut Buffer) {
         self.home.draw(layout, buf);
-        let popup_area = util::layout_centered(22, 4, layout.board);
+        let popup_area = util::layout_centered(22, 5, layout.board);
         Clear.render(popup_area, buf);
         StatefulWidget::render(
-            List::new(["Initial position", "Custom position"])
+            List::new(["Standard chess", "Chess960", "Custom position"])
                 .highlight_symbol("> ")
                 .block(Block::bordered().title("New Game").fg(Color::Yellow)),
             popup_area,
