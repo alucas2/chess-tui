@@ -43,7 +43,7 @@ pub fn moves_with_notation(gs: &GameState) -> Vec<MoveWithNotation> {
         .iter()
         .filter_map(|&mv| {
             gs.make_move(mv).ok().map(|next_gs| {
-                let mv_info = gs.move_info(mv);
+                let mv_info = mv.info(gs);
                 let capture =
                     gs.piece(mv_info.to).is_some() || mv_info.flag == engine::MoveFlag::EnPassant;
                 let outcome = if next_gs.is_check() {

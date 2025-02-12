@@ -35,26 +35,47 @@ pub enum MoveFlag {
     CastleWest,
 }
 
+impl Move {
+    /// Get info about a move.
+    /// This function must be called with the state that this move originate from!
+    pub fn info(&self, gs: &GameState) -> MoveInfo {
+        let (start, end) = match gs.side_to_move {
+            PlayerSide::White => (self.from, self.to),
+            PlayerSide::Black => (self.from.mirror(), self.to.mirror()),
+        };
+        MoveInfo {
+            kind: self.kind,
+            from: start,
+            to: end,
+            flag: self.flag,
+        }
+    }
+}
+
+impl std::fmt::Display for MoveInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (from_file, from_rank) = self.from.coords();
+        let (to_file, to_rank) = self.to.coords();
+        write!(
+            f,
+            "{}{}{}{}",
+            from_file.label(),
+            from_rank.label(),
+            to_file.label(),
+            to_rank.label(),
+        )?;
+        if let MoveFlag::Promotion(prom) = self.flag {
+            write!(f, "{}", prom.label())?
+        }
+        Ok(())
+    }
+}
+
 /// An error raised when a move puts the king in check.
 #[derive(Debug, Clone, Copy)]
 pub struct IllegalMoveError;
 
 impl GameState {
-    /// Get info about a move.
-    /// This function must be called with a move that has been generated from this state!
-    pub fn move_info(&self, mv: Move) -> MoveInfo {
-        let (start, end) = match self.side_to_move {
-            PlayerSide::White => (mv.from, mv.to),
-            PlayerSide::Black => (mv.from.mirror(), mv.to.mirror()),
-        };
-        MoveInfo {
-            kind: mv.kind,
-            from: start,
-            to: end,
-            flag: mv.flag,
-        }
-    }
-
     /// Collect all the pseudo-legal moves from a given state.
     pub fn pseudo_legal_moves<F: FnMut(Move)>(&self, f: F) {
         gen_moves::<false, F>(self, f)

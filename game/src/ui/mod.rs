@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{custom_widgets, fen};
+use crate::{custom_widgets, starting_position};
 
 pub struct Ui {
     state: State,
@@ -41,7 +41,7 @@ trait IState {
 impl Ui {
     pub fn new() -> Self {
         Ui {
-            state: State::Running(Box::new(Home::new(fen::initial_position()))),
+            state: State::Running(Box::new(Home::new(starting_position::initial_position()))),
         }
     }
 

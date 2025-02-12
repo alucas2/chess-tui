@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Clear, Widget},
 };
 
-use crate::{custom_widgets, fen, util};
+use crate::{custom_widgets, util};
 
 use super::{home::Home, IState, State, UiLayout};
 
@@ -22,7 +22,7 @@ impl EditFen {
     pub fn new(parent: Box<dyn IState>, gamestate: GameState) -> EditFen {
         EditFen {
             parent,
-            textarea: custom_widgets::TextArea::new(fen::unparse(&gamestate)),
+            textarea: custom_widgets::TextArea::new(gamestate.to_string()),
             parsed_gamestate: gamestate,
             valid: true,
         }
@@ -54,7 +54,7 @@ impl IState for EditFen {
             }
             _ => {
                 if self.textarea.update(event) {
-                    match fen::parse(self.textarea.text()) {
+                    match self.textarea.text().parse() {
                         Ok(gs) => {
                             self.valid = true;
                             self.parsed_gamestate = gs;

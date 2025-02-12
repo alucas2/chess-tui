@@ -59,7 +59,7 @@ fn main() {
             // Compute perft and compare
             if let Some(true_value) = true_value {
                 println!("{fen:<90} Depth: {depth:<2} Value: {true_value:<10}");
-                let gs = game::fen::parse(fen).unwrap();
+                let gs = fen.parse().unwrap();
                 let result = perft(&gs, depth, true, &cache);
                 assert_eq!(result, true_value);
             }

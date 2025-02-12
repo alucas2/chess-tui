@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListState, StatefulWidget, Widget},
 };
 
-use crate::{custom_widgets, fen, util};
+use crate::{custom_widgets, starting_position, util};
 
 use super::{edit_fen::EditFen, home::Home, IState, State, UiLayout};
 
@@ -32,11 +32,11 @@ impl IState for NewGamePopup {
             Some(KeyCode::Down) => self.list.select_next(),
             Some(KeyCode::Enter) => match self.list.selected() {
                 Some(0) => {
-                    let gs = fen::initial_position();
+                    let gs = starting_position::initial_position();
                     return State::Running(Box::new(Home::new(gs)));
                 }
                 Some(1) => {
-                    let gs = fen::random_chess960_position();
+                    let gs = starting_position::random_chess960_position();
                     return State::Running(Box::new(Home::new(gs)));
                 }
                 Some(2) => {

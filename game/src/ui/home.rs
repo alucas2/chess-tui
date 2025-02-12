@@ -7,9 +7,7 @@ use ratatui::{
     widgets::{Block, Gauge, Padding, Paragraph, Widget},
 };
 
-use crate::{
-    custom_widgets, fen, game_state::GameStateHistory, moves::MoveWithNotation, style, util,
-};
+use crate::{custom_widgets, game_state::GameStateHistory, moves::MoveWithNotation, style, util};
 
 use super::{
     newgame_popup::NewGamePopup, promotion_popup::PromotionPopup, IState, State, UiLayout,
@@ -162,7 +160,7 @@ impl Home {
     }
 
     fn draw_position_panel(&self, layout: &UiLayout, buf: &mut Buffer) {
-        let fen = fen::unparse(self.gamestate.current());
+        let fen = self.gamestate.current().to_string();
         Paragraph::new(fen)
             .block(Block::bordered().title("Position"))
             .render(layout.fen_panel, buf);

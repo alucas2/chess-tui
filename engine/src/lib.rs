@@ -1,4 +1,5 @@
 mod atomic_cell;
+mod fen;
 mod game_state;
 mod lookup_tables;
 mod moves;
