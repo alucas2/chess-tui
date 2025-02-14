@@ -1,11 +1,12 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI16, AtomicU64, Ordering},
         Arc, LazyLock, RwLock,
     },
     thread,
 };
 
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use smallvec::SmallVec;
 
 use crate::{evaluate::Score, GameState, Move, ScoreInfo, Table, TableKey};
@@ -96,6 +97,7 @@ impl Search {
                         &TABLE,
                         &mut new_stats,
                         Some(&result),
+                        true,
                     ) else {
                         break; // Search has been interrupted
                     };
@@ -162,12 +164,13 @@ fn eval_minmax(
     beta: Score,
     depth: u16,
     stop: &AtomicBool,
-    table: &Table<(), TableValue>,
-    stats: &mut SearchStatistics,
+    tt: &Table<(), TableValue>,
+    stat: &mut SearchStatistics,
     argmax: Option<&SearchResultCell>,
+    parallel: bool,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
-        return Ok(eval_quiescent(gs, alpha, beta, stop, stats)?);
+        return Ok(eval_quiescent(gs, alpha, beta, stop, stat)?);
     }
     if stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
@@ -175,9 +178,9 @@ fn eval_minmax(
 
     // Lookup in the table
     let table_key = TableKey::new(gs, ());
-    let table_move = match table.lookup(&table_key) {
+    let table_move = match tt.lookup(&table_key) {
         Some(e) if e.depth == depth => {
-            stats.table_hits += 1;
+            stat.table_hits += 1;
             if let Some(argmax) = argmax {
                 // Update the search result
                 argmax.store(SearchResult {
@@ -195,27 +198,104 @@ fn eval_minmax(
     let mut score = Score::NEG_INF;
     let mut best = None;
 
-    // Pop and explore the branches, starting from the most promising
-    stats.expanded_nodes += 1;
-    let mut branches = BranchIterator::new(gs, table_move);
-    while let Some((mv, next_gs)) = branches.next(generate_moves) {
-        let branch_score =
-            -eval_minmax(&next_gs, -beta, -alpha, depth - 1, stop, table, stats, None)?;
-        if branch_score > score {
-            best = Some(mv);
-            if let Some(argmax) = argmax {
-                // Update the search result
-                argmax.store(SearchResult {
-                    depth,
-                    score: branch_score,
-                    best,
-                });
-            }
+    let update_argmax = |new_score, new_best| {
+        if let Some(argmax) = argmax {
+            argmax.store(SearchResult {
+                depth,
+                score: new_score,
+                best: new_best,
+            })
         }
-        score = score.max(branch_score);
-        alpha = alpha.max(score);
-        if alpha >= beta {
-            break;
+    };
+
+    // Pop and explore the branches, starting from the most promising
+    stat.expanded_nodes += 1;
+    let mut branches = BranchIterator::new(gs, table_move);
+    'cutoff: {
+        if !parallel {
+            // Search the branches sequentially
+            while let Some((mv, next)) = branches.next(generate_moves) {
+                let branch_score =
+                    -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, stat, None, false)?;
+                if branch_score > score {
+                    best = Some(mv);
+                    update_argmax(branch_score, best);
+                }
+                score = score.max(branch_score);
+                alpha = alpha.max(score);
+                if alpha >= beta {
+                    break 'cutoff;
+                }
+            }
+        } else {
+            // Search the first branch first, passing the parallel flag
+            // This method is called PV-splitting
+            if let Some((mv, next)) = branches.next(generate_moves) {
+                let branch_score =
+                    -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, stat, None, true)?;
+                if branch_score > score {
+                    best = Some(mv);
+                    update_argmax(branch_score, best);
+                }
+                score = score.max(branch_score);
+                alpha = alpha.max(score);
+                if alpha >= beta {
+                    break 'cutoff;
+                }
+            }
+            // Search the remaining branches in parallel
+            let shared_alpha = AtomicI16::new(alpha.0);
+            let shared_score = AtomicI16::new(score.0);
+            type ExploreBranchOk = Option<(Move, Score, SearchStatistics)>;
+            let explore_branch = |(mv, next)| -> Result<ExploreBranchOk, SearchInterrupted> {
+                // Read the shared alpha value that other threads might have updated
+                let alpha = Score(shared_alpha.load(Ordering::Relaxed));
+                if alpha >= beta {
+                    return Ok(None); // Cutoff
+                }
+                let mut branch_stat = SearchStatistics::default();
+                let stat = &mut branch_stat;
+                let branch_score =
+                    -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, stat, None, false)?;
+                // Update the shared score and argmax in advance
+                // so the work is not thrown away if the search is interrupted
+                let mut score = Score(shared_score.fetch_max(branch_score.0, Ordering::Relaxed));
+                if branch_score > score {
+                    update_argmax(branch_score, Some(mv));
+                }
+                // Update the shared alpha for other threads to see
+                score = score.max(branch_score);
+                shared_alpha.fetch_max(score.0, Ordering::Relaxed);
+                Ok(Some((mv, branch_score, branch_stat)))
+            };
+            let reduce_branch = |a: ExploreBranchOk, b: ExploreBranchOk| {
+                Ok(match (a, b) {
+                    (None, None) => None,
+                    (Some(x), None) | (None, Some(x)) => Some(x),
+                    (Some((a_mv, a_score, a_stat)), Some((b_mv, b_score, b_stat))) => {
+                        let mut stat = a_stat;
+                        stat.add(&b_stat);
+                        Some(if a_score > b_score {
+                            (a_mv, a_score, stat)
+                        } else {
+                            (b_mv, b_score, stat)
+                        })
+                    }
+                })
+            };
+            if let Some((mv, branch_score, branch_stat)) =
+                std::iter::from_fn(|| branches.next(generate_moves))
+                    .par_bridge()
+                    .map(explore_branch)
+                    .try_reduce(|| None, reduce_branch)?
+            {
+                if branch_score > score {
+                    best = Some(mv);
+                    update_argmax(branch_score, best);
+                }
+                score = score.max(branch_score);
+                stat.add(&branch_stat);
+            }
         }
     }
 
@@ -229,8 +309,8 @@ fn eval_minmax(
     }
 
     let table_value = TableValue { depth, score, best };
-    if table.update(table_key, table_value) {
-        stats.table_rewrites += 1;
+    if tt.update(table_key, table_value) {
+        stat.table_rewrites += 1;
     }
     Ok(score)
 }
@@ -352,5 +432,17 @@ impl<'a, A: smallvec::Array<Item = MoveWithKey>> BranchIterator<'a, A> {
                 }
             }
         }
+    }
+}
+
+impl SearchStatistics {
+    fn add(&mut self, other: &SearchStatistics) {
+        *self = SearchStatistics {
+            expanded_nodes: self.expanded_nodes + other.expanded_nodes,
+            expanded_nodes_quiescent: self.expanded_nodes_quiescent
+                + other.expanded_nodes_quiescent,
+            table_hits: self.table_hits + other.table_hits,
+            table_rewrites: self.table_rewrites + other.table_rewrites,
+        };
     }
 }
