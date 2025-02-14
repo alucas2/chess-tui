@@ -8,7 +8,7 @@ use std::{
 
 use smallvec::SmallVec;
 
-use crate::{GameState, Move, Table, TableKey};
+use crate::{evaluate::Score, GameState, Move, ScoreInfo, Table, TableKey};
 
 /// Handle to the search thread
 pub struct Search {
@@ -34,15 +34,6 @@ pub struct SearchStatus {
     pub stats: SearchStatistics,
 }
 
-#[derive(Clone, Copy)]
-pub enum ScoreInfo {
-    Normal(i16),
-    /// Position is a win in the specified number of moves
-    Win(u16),
-    /// Position is a loss in the specified number of moves
-    Loose(u16),
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct SearchStatistics {
     /// Number of nodes for which we explored the moves
@@ -66,13 +57,6 @@ struct SearchResult {
 /// Shared container for a search result
 #[derive(Debug)]
 struct SearchResultCell(AtomicU64);
-
-/// Opaque score that can be compared with other scores.
-/// Score::MAX represents a winning position. Score::MIN represents a losing position.
-/// Score::NEG_INF acts like "negative infinity", which is a placeholder invalid score.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-struct Score(i16);
 
 /// Values that are stored in the table.
 /// Its size should not be excessive to fit within a table entry
@@ -265,7 +249,7 @@ fn eval_quiescent(
 
     // In quiescence search, don't forget to consider that we can stop capturing anytime!
     // (Actually not anytime, there might be forced captures, but rarely)
-    let mut score = eval_heuristic(gs);
+    let mut score = gs.evaluator.eval();
     alpha = alpha.max(score);
     if alpha >= beta {
         return Ok(score);
@@ -291,11 +275,6 @@ fn eval_quiescent(
     Ok(score)
 }
 
-/// Evaluate a position with a fast heuristic
-fn eval_heuristic(gs: &GameState) -> Score {
-    Score(gs.material_value)
-}
-
 fn generate_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 64]> {
     let mut moves = SmallVec::new();
     gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
@@ -319,21 +298,6 @@ fn take_highest_move<A: smallvec::Array<Item = MoveWithKey>>(
 ) -> Option<Move> {
     let (index, _) = moves.iter().enumerate().max_by_key(|(_, mv)| mv.key)?;
     Some(moves.swap_remove(index).mv)
-}
-
-impl Score {
-    const ZERO: Score = Score(0);
-    const MAX: Score = Score(i16::MAX);
-    const MIN: Score = Score(-i16::MAX);
-    const NEG_INF: Score = Score(i16::MIN);
-}
-
-impl std::ops::Neg for Score {
-    type Output = Score;
-
-    fn neg(self) -> Self::Output {
-        Score(-self.0)
-    }
 }
 
 impl SearchResultCell {

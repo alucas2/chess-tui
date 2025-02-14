@@ -1,4 +1,5 @@
 use crate::{
+    evaluate,
     game_state::{GameState, PieceBitboards},
     lookup_tables as lut, PieceKind, PlayerSide, RankIndex, SquareIndex, SquareIter,
 };
@@ -94,12 +95,12 @@ impl GameState {
 
         // Bonus for capturing an enemy with a cheap friend
         if let Some((_, kind)) = self.pieces.get(mv.to) {
-            score += 10 * lut::piece_value(kind) - lut::piece_value(mv.kind);
+            score += 10 * evaluate::piece_value(kind) - evaluate::piece_value(mv.kind);
         }
 
         // Bonus for promoting a piece
         if let MoveFlag::Promotion(kind) = mv.flag {
-            score += 2000 + lut::piece_value(kind)
+            score += 2000 + evaluate::piece_value(kind)
         }
 
         score
@@ -215,7 +216,7 @@ impl GameState {
                 PlayerSide::White => self.fullmoves,
                 PlayerSide::Black => self.fullmoves + 1,
             },
-            material_value: -self.material_value,
+            evaluator: self.evaluator.mirror(),
         })
     }
 

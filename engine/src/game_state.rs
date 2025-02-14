@@ -1,4 +1,4 @@
-use crate::{lookup_tables as lut, FileIndex, PieceKind, PlayerSide, SquareIndex};
+use crate::{evaluate::Evaluator, FileIndex, PieceKind, PlayerSide, SquareIndex};
 
 /// State of the game.
 ///
@@ -24,7 +24,7 @@ pub struct GameState {
     /// Number of full moves, incremented after black has played
     pub(crate) fullmoves: u16,
     /// Evaluation of the material on the board, from the pov of the side to move
-    pub(crate) material_value: i16,
+    pub(crate) evaluator: Evaluator,
 }
 
 /// Array of 6 bitboards, one for each piece kind
@@ -77,7 +77,7 @@ impl GameState {
                 enemies_castle: self.friends_castle,
                 en_passant: self.en_passant,
                 fullmoves: self.fullmoves,
-                material_value: -self.material_value,
+                evaluator: self.evaluator.mirror(),
             }
         }
     }
@@ -122,10 +122,10 @@ impl GameState {
         self.pieces.set(at, None);
         if side == self.side_to_move {
             self.friends_bb[kind] ^= at.bb().get();
-            self.material_value -= lut::piece_value_table(kind)[at as usize];
+            self.evaluator.remove_friend_piece(at, kind);
         } else {
             self.enemies_bb[kind] ^= at.bb().get();
-            self.material_value += lut::piece_value_table(kind)[at.mirror() as usize];
+            self.evaluator.remove_enemy_piece(at, kind);
         }
     }
 
@@ -137,10 +137,10 @@ impl GameState {
         self.pieces.set(at, Some((side, kind)));
         if side == self.side_to_move {
             self.friends_bb[kind] ^= at.bb().get();
-            self.material_value += lut::piece_value_table(kind)[at as usize];
+            self.evaluator.put_friend_piece(at, kind);
         } else {
             self.enemies_bb[kind] ^= at.bb().get();
-            self.material_value -= lut::piece_value_table(kind)[at.mirror() as usize];
+            self.evaluator.put_enemy_piece(at, kind);
         }
     }
 }
