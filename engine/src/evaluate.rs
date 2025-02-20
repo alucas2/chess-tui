@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicI16, Ordering};
+
 use crate::{PieceKind, SquareIndex};
 
 /// Opaque score that can be compared with other scores.
@@ -6,6 +8,11 @@ use crate::{PieceKind, SquareIndex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Score(pub(crate) i16);
+
+/// Atomic version of score
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct AtomicScore(AtomicI16);
 
 #[derive(Debug, Clone, Copy)]
 pub enum ScoreInfo {
@@ -38,6 +45,20 @@ impl std::ops::Neg for Score {
 
     fn neg(self) -> Self::Output {
         Score(-self.0)
+    }
+}
+
+impl AtomicScore {
+    pub fn new(val: Score) -> Self {
+        AtomicScore(AtomicI16::new(val.0))
+    }
+
+    pub fn load(&self) -> Score {
+        Score(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn fetch_max(&self, val: Score) -> Score {
+        Score(self.0.fetch_max(val.0, Ordering::Relaxed))
     }
 }
 

@@ -9,8 +9,8 @@ use crate::{
 };
 
 /// Size of a table entry is:
-/// `8 + 34 + size_of::<X> + size_of::<V>`
-/// Where 8 corresponds to the size of the seqlock and 106 the size of the gamestate
+/// `8 + 36 + size_of::<X> + size_of::<V>`
+/// Where 8 corresponds to the size of the seqlock and 36 the size of the gamestate
 pub struct Table<X, V> {
     entries: Vec<AtomicCell<Option<Entry<X, V>>>>,
 }
