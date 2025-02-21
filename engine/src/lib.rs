@@ -3,6 +3,7 @@ mod evaluate;
 mod fen;
 mod game_state;
 mod lookup_tables;
+mod move_predictor;
 mod moves;
 mod search;
 mod transposition_table;

@@ -3,7 +3,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, LazyLock, Mutex, RwLock,
     },
-    thread,
+    thread, time,
 };
 
 use rayon::iter::{ParallelBridge, ParallelIterator};
@@ -11,6 +11,7 @@ use smallvec::SmallVec;
 
 use crate::{
     evaluate::{AtomicScore, Score},
+    move_predictor::{self, MovePredictor},
     GameState, Move, ScoreInfo, Table, TableKey,
 };
 
@@ -20,6 +21,8 @@ pub struct Search {
     stop: Arc<AtomicBool>,
     stats: Arc<RwLock<SearchStatistics>>,
     handle: Option<thread::JoinHandle<()>>,
+    start: time::Instant,
+    finish: Arc<RwLock<Option<time::Instant>>>,
 }
 
 /// Status of the search that is updated by the search thread
@@ -36,6 +39,8 @@ pub struct SearchStatus {
     pub best: Option<Move>,
     /// Search performance metrics
     pub stats: SearchStatistics,
+    /// Time elapsed
+    pub elapsed: time::Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,10 +87,13 @@ impl Search {
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(RwLock::new(SearchStatistics::default()));
+        let start = time::Instant::now();
+        let finish = Arc::new(RwLock::new(None));
         let handle = {
             let result = Arc::clone(&result);
             let stop = Arc::clone(&stop);
             let stats = Arc::clone(&stats);
+            let finish = Arc::clone(&finish);
             thread::spawn(move || {
                 // Iterative deepening
                 for depth in 1..=20 {
@@ -102,12 +110,14 @@ impl Search {
                     ) else {
                         break; // Search has been interrupted
                     };
-                    *stats.write().unwrap() = new_stats;
+                    stats.write().unwrap().add(&new_stats);
                     if final_score == Score::MIN || final_score == Score::MAX {
                         result.write().unwrap().score = final_score;
                         break; // Stop deepening when a checkmate is found
                     }
                 }
+                // Signal the end of the search
+                *finish.write().unwrap() = Some(time::Instant::now());
             })
         };
         Search {
@@ -115,13 +125,20 @@ impl Search {
             stop,
             stats,
             handle: Some(handle),
+            start,
+            finish,
         }
     }
 
     pub fn status(&self) -> SearchStatus {
         let result = self.result.read().unwrap().clone();
+        let stats = self.stats.read().unwrap().clone();
+        let (elapsed, thinking) = match *self.finish.read().unwrap() {
+            Some(finish) => (finish - self.start, false),
+            None => (self.start.elapsed(), true),
+        };
         SearchStatus {
-            thinking: self.handle.as_ref().is_some_and(|h| !h.is_finished()),
+            thinking,
             depth: result.depth,
             score: match result.score {
                 Score::MAX => ScoreInfo::Win(result.depth - 1),
@@ -129,7 +146,8 @@ impl Search {
                 Score(x) => ScoreInfo::Normal(x),
             },
             best: result.best,
-            stats: self.stats.read().unwrap().clone(),
+            stats,
+            elapsed,
         }
     }
 }
@@ -147,16 +165,6 @@ struct SearchInterrupted;
 struct MoveWithKey {
     mv: Move,
     key: i16,
-}
-
-/// An iterator over the banches of a gamestate.
-/// - the first call to `next` will return the table move if provided,
-/// - the remaining calls to `next` will lazily generate and return the rest of the moves
-struct BranchIterator<'a, A: smallvec::Array<Item = MoveWithKey>> {
-    gs: &'a GameState,
-    table_move: Option<Move>,
-    table_move_taken: bool,
-    generated_moves: Option<SmallVec<A>>,
 }
 
 fn eval_minmax_pv_split(
@@ -205,11 +213,14 @@ fn eval_minmax_pv_split(
     let mut best = None;
 
     stat.expanded_nodes += 1;
-    let mut branches = BranchIterator::new(gs, table_move);
+    let mut branches = Branches::new(table_move);
     'cutoff: {
         // Search the first branch first, passing the parallel flag
         // This method is called PV-splitting
-        if let Some((mv, next)) = branches.next(generate_moves) {
+        while let Some(mv) = branches.next(|| generate_moves(gs)) {
+            let Ok(next) = gs.make_move(mv) else {
+                continue;
+            };
             let branch_score =
                 -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, stop, tt, stat, None)?;
             best = Some(mv);
@@ -219,23 +230,37 @@ fn eval_minmax_pv_split(
             if alpha >= beta {
                 break 'cutoff;
             }
+            break; // First branch exploration complete
         }
 
         // Search the remaining branches in parallel
         let shared_alpha = AtomicScore::new(alpha);
         let shared_score_best = Mutex::new((score, best));
         let shared_stat = Mutex::new(stat);
-        std::iter::from_fn(|| branches.next(generate_moves))
+        std::iter::from_fn(|| branches.next(|| generate_moves(gs)))
             .par_bridge()
-            .try_for_each(|(mv, next)| {
+            .try_for_each(|mv| {
+                let Ok(next) = gs.make_move(mv) else {
+                    return Ok(()); // Illegal move
+                };
+
                 // Read the shared alpha value that other threads might have updated
                 let alpha = shared_alpha.load();
                 if alpha >= beta {
                     return Ok(()); // Cutoff
                 }
                 let mut stat = SearchStatistics::default();
-                let branch_score =
-                    -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, &mut stat)?;
+                let mut mp = MovePredictor::default();
+                let branch_score = -eval_minmax(
+                    &next,
+                    -beta,
+                    -alpha,
+                    depth - 1,
+                    stop,
+                    tt,
+                    &mut mp,
+                    &mut stat,
+                )?;
                 shared_stat.lock().unwrap().add(&stat);
 
                 // Lock score and best together to keep them in sync
@@ -276,6 +301,7 @@ fn eval_minmax(
     depth: u16,
     stop: &AtomicBool,
     tt: &Table<(), TableValue>,
+    mp: &mut MovePredictor,
     stat: &mut SearchStatistics,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
@@ -301,15 +327,19 @@ fn eval_minmax(
 
     // Pop and explore the branches, starting from the most promising
     stat.expanded_nodes += 1;
-    let mut branches = BranchIterator::new(gs, table_move);
-    while let Some((mv, next)) = branches.next(generate_moves) {
-        let branch_score = -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, stat)?;
+    let mut branches = Branches::new(table_move);
+    while let Some(mv) = branches.next(|| generate_moves_with_predictor(gs, mp)) {
+        let Ok(next) = gs.make_move(mv) else {
+            continue;
+        };
+        let branch_score = -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, mp, stat)?;
         if branch_score > score {
             best = Some(mv);
         }
         score = score.max(branch_score);
         alpha = alpha.max(score);
         if alpha >= beta {
+            mp.apply_cutoff_bonus(gs, mv);
             break;
         }
     }
@@ -352,7 +382,7 @@ fn eval_quiescent(
 
     // Generate the captures and assign them a score
     stats.expanded_nodes_quiescent += 1;
-    let mut moves = generate_moves_quiescent(gs);
+    let mut moves = generate_captures(gs);
 
     // Pop and explore the branches, starting from the most promising
     while let Some(mv) = take_highest_move(&mut moves) {
@@ -374,16 +404,28 @@ fn generate_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 64]> {
     let mut moves = SmallVec::new();
     gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
-        *key = gs.eval_move(*mv);
+        *key = move_predictor::eval(gs, *mv);
     }
     moves
 }
 
-fn generate_moves_quiescent(gs: &GameState) -> SmallVec<[MoveWithKey; 16]> {
+fn generate_moves_with_predictor(
+    gs: &GameState,
+    mp: &MovePredictor,
+) -> SmallVec<[MoveWithKey; 64]> {
+    let mut moves = SmallVec::<[_; 64]>::new();
+    gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
+    for MoveWithKey { mv, key } in moves.iter_mut() {
+        *key = mp.eval(gs, *mv);
+    }
+    moves
+}
+
+fn generate_captures(gs: &GameState) -> SmallVec<[MoveWithKey; 16]> {
     let mut moves = SmallVec::new();
     gs.pseudo_legal_captures(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
-        *key = gs.eval_move(*mv);
+        *key = move_predictor::eval(gs, *mv);
     }
     moves
 }
@@ -395,42 +437,6 @@ fn take_highest_move<A: smallvec::Array<Item = MoveWithKey>>(
     Some(moves.swap_remove(index).mv)
 }
 
-impl<'a, A: smallvec::Array<Item = MoveWithKey>> BranchIterator<'a, A> {
-    pub fn new(gs: &'a GameState, table_move: Option<Move>) -> Self {
-        BranchIterator {
-            gs,
-            table_move,
-            table_move_taken: false,
-            generated_moves: None,
-        }
-    }
-
-    pub fn next<F: FnOnce(&GameState) -> SmallVec<A>>(
-        &mut self,
-        f: F,
-    ) -> Option<(Move, GameState)> {
-        match (self.table_move, self.table_move_taken) {
-            (Some(mv), false) => {
-                self.table_move_taken = true;
-                let next_gs = self.gs.make_move(mv).expect("Table move should be legal");
-                Some((mv, next_gs))
-            }
-            _ => {
-                let generated_moves = self.generated_moves.get_or_insert_with(|| f(self.gs));
-                loop {
-                    let mv = take_highest_move(generated_moves)?;
-                    if Some(mv) == self.table_move {
-                        continue;
-                    }
-                    if let Ok(next_gs) = self.gs.make_move(mv) {
-                        break Some((mv, next_gs));
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl SearchStatistics {
     fn add(&mut self, other: &SearchStatistics) {
         *self = SearchStatistics {
@@ -440,5 +446,57 @@ impl SearchStatistics {
             table_hits: self.table_hits + other.table_hits,
             table_rewrites: self.table_rewrites + other.table_rewrites,
         };
+    }
+}
+
+enum Branches<A: smallvec::Array<Item = MoveWithKey>> {
+    TableMove(Option<Move>),
+    RestUngenerated {
+        table_mv: Option<Move>,
+    },
+    RestGenerated {
+        table_mv: Option<Move>,
+        rest: SmallVec<A>,
+    },
+}
+
+impl<A: smallvec::Array<Item = MoveWithKey>> Branches<A> {
+    pub fn new(table_move: Option<Move>) -> Self {
+        Branches::TableMove(table_move)
+    }
+
+    pub fn next<F: FnOnce() -> SmallVec<A>>(&mut self, f: F) -> Option<Move> {
+        match self {
+            Branches::TableMove(table_move) => match table_move.take() {
+                Some(mv) => {
+                    *self = Branches::RestUngenerated { table_mv: Some(mv) };
+                    Some(mv) // Yield the table move
+                }
+                None => {
+                    *self = Branches::RestUngenerated { table_mv: None };
+                    self.next(f)
+                }
+            },
+            Branches::RestUngenerated { table_mv } => {
+                let rest = f();
+                let table_mv = *table_mv;
+                *self = Branches::RestGenerated { table_mv, rest };
+                self.next_rest()
+            }
+            Branches::RestGenerated { .. } => self.next_rest(),
+        }
+    }
+
+    fn next_rest(&mut self) -> Option<Move> {
+        match self {
+            Branches::RestGenerated { table_mv, rest } => loop {
+                let (index, _) = rest.iter().enumerate().max_by_key(|(_, mv)| mv.key)?;
+                let mv = rest.swap_remove(index).mv;
+                if Some(mv) != *table_mv {
+                    break Some(mv); // Yield a generated move
+                }
+            },
+            _ => unreachable!(),
+        }
     }
 }

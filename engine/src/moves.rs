@@ -1,5 +1,4 @@
 use crate::{
-    evaluate,
     game_state::{GameState, PieceBitboards},
     lookup_tables as lut, PieceKind, PlayerSide, RankIndex, SquareIndex, SquareIter,
 };
@@ -7,13 +6,13 @@ use crate::{
 /// Opaque move token
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Move {
-    kind: PieceKind,
+    pub(crate) kind: PieceKind,
     /// Note: square is mirrored when it's a black move
-    from: SquareIndex,
+    pub(crate) from: SquareIndex,
     /// Note: square is mirrored when it's a black move.
     /// For castling, it is the rook's starting square instead the king's landing square
-    to: SquareIndex,
-    flag: MoveFlag,
+    pub(crate) to: SquareIndex,
+    pub(crate) flag: MoveFlag,
 }
 
 /// Information about a move
@@ -85,25 +84,6 @@ impl GameState {
     /// Collect the pseudo-legal moves from a given state, but only the captures.
     pub fn pseudo_legal_captures<F: FnMut(Move)>(&self, f: F) {
         gen_moves::<true, F>(self, f)
-    }
-
-    /// Make a fast evaluation of a move.
-    /// NOTE: The "score" returned by this function has nothing to do with
-    /// the "score" of a gamestate, the latter being represented by the `Score` type.
-    pub fn eval_move(&self, mv: Move) -> i16 {
-        let mut score = 0;
-
-        // Bonus for capturing an enemy with a cheap friend
-        if let Some((_, kind)) = self.pieces.get(mv.to) {
-            score += 10 * evaluate::piece_value(kind) - evaluate::piece_value(mv.kind);
-        }
-
-        // Bonus for promoting a piece
-        if let MoveFlag::Promotion(kind) = mv.flag {
-            score += 2000 + evaluate::piece_value(kind)
-        }
-
-        score
     }
 
     /// Perform a move, then flip the position of enemies and friends.
