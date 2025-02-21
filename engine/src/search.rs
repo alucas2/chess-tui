@@ -250,7 +250,7 @@ fn eval_minmax_pv_split(
                     return Ok(()); // Cutoff
                 }
                 let mut stat = SearchStatistics::default();
-                let mut mp = MovePredictor::default();
+                let mut mp = MovePredictor::new(depth);
                 let branch_score = -eval_minmax(
                     &next,
                     -beta,
@@ -328,7 +328,7 @@ fn eval_minmax(
     // Pop and explore the branches, starting from the most promising
     stat.expanded_nodes += 1;
     let mut branches = Branches::new(table_move);
-    while let Some(mv) = branches.next(|| generate_moves_with_predictor(gs, mp)) {
+    while let Some(mv) = branches.next(|| generate_moves_with_predictor(gs, mp, depth)) {
         let Ok(next) = gs.make_move(mv) else {
             continue;
         };
@@ -339,7 +339,7 @@ fn eval_minmax(
         score = score.max(branch_score);
         alpha = alpha.max(score);
         if alpha >= beta {
-            mp.apply_cutoff_bonus(gs, mv);
+            mp.apply_cutoff_bonus(gs, mv, depth);
             break;
         }
     }
@@ -412,11 +412,12 @@ fn generate_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 64]> {
 fn generate_moves_with_predictor(
     gs: &GameState,
     mp: &MovePredictor,
+    depth: u16,
 ) -> SmallVec<[MoveWithKey; 64]> {
     let mut moves = SmallVec::<[_; 64]>::new();
     gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
-        *key = mp.eval(gs, *mv);
+        *key = mp.eval(gs, *mv, depth);
     }
     moves
 }
