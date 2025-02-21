@@ -199,6 +199,9 @@ impl Home {
             Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
                 .areas(block.inner(layout.ponder_panel));
 
+        let seconds = result.elapsed.as_secs_f64();
+        block = block.title(format!("{:.1} s", seconds));
+
         // Add a cute spinner if the computer is still pondering
         if result.thinking {
             let spinner = {
