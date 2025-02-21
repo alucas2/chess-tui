@@ -98,7 +98,7 @@ impl Search {
                 // Iterative deepening
                 for depth in 1..=20 {
                     let mut new_stats = SearchStatistics::default();
-                    let Ok(final_score) = eval_minmax_pv_split(
+                    let final_score = eval_minmax_pv_split(
                         &gs,
                         Score::MIN,
                         Score::MAX,
@@ -107,10 +107,11 @@ impl Search {
                         &TABLE,
                         &mut new_stats,
                         Some(&result),
-                    ) else {
+                    );
+                    stats.write().unwrap().add(&new_stats);
+                    let Ok(final_score) = final_score else {
                         break; // Search has been interrupted
                     };
-                    stats.write().unwrap().add(&new_stats);
                     if final_score == Score::MIN || final_score == Score::MAX {
                         result.write().unwrap().score = final_score;
                         break; // Stop deepening when a checkmate is found
