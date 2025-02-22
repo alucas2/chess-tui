@@ -10,7 +10,7 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 use smallvec::SmallVec;
 
 use crate::{
-    evaluate::{AtomicScore, Score},
+    evaluate::{self, AtomicScore, Score},
     move_predictor::{self, MovePredictor},
     GameState, Move, ScoreInfo, Table, TableKey,
 };
@@ -72,13 +72,13 @@ struct TableValue {
     best: Option<Move>,
 }
 
-const TABLE_NUM_ENTRIES: usize = 2_usize.pow(22);
+const TABLE_NUM_ENTRIES: usize = 2_usize.pow(23);
 static TABLE: LazyLock<Table<(), TableValue>> = LazyLock::new(|| Table::new(TABLE_NUM_ENTRIES));
 
 impl Search {
     pub fn start(gs: GameState) -> Self {
         let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
+            .num_threads(1)
             .build_global();
         let result = Arc::new(RwLock::new(SearchResult {
             depth: 1,
@@ -375,7 +375,7 @@ fn eval_quiescent(
 
     // In quiescence search, don't forget to consider that we can stop capturing anytime!
     // (Actually not anytime, there might be forced captures, but rarely)
-    let mut score = gs.evaluator.eval();
+    let mut score = evaluate::eval(gs);
     alpha = alpha.max(score);
     if alpha >= beta {
         return Ok(score);

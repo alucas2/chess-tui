@@ -196,7 +196,6 @@ impl GameState {
                 PlayerSide::White => self.fullmoves,
                 PlayerSide::Black => self.fullmoves + 1,
             },
-            evaluator: self.evaluator.mirror(),
         })
     }
 

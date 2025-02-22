@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::{PieceKind, SquareIndex};
+use crate::{GameState, PieceKind, SquareIter};
 
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
@@ -21,16 +21,6 @@ pub enum ScoreInfo {
     Win(u16),
     /// Position is a loss in the specified number of moves
     Loose(u16),
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Evaluator {
-    /// Difference in material between friends and enemies, assuming midgame
-    friend_diff_midgame: i16,
-    /// Difference in material between friends and enemies, assuming endgame
-    friend_diff_endgame: i16,
-    /// Sum of friend and enemy material, used to blend between midgame and endgame
-    total_material: i16,
 }
 
 impl Score {
@@ -62,46 +52,32 @@ impl AtomicScore {
     }
 }
 
-impl Evaluator {
-    pub fn eval(&self) -> Score {
-        // 10000 is considered the beginning of the game, 6000 the end of the game
-        let midgame_factor = ((self.total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
-        let midgame_value = self.friend_diff_midgame as f32 * midgame_factor;
-        let endgame_value = self.friend_diff_endgame as f32 * (1.0 - midgame_factor);
-        Score((midgame_value + endgame_value).round() as i16)
-    }
-
-    pub fn mirror(&self) -> Evaluator {
-        Evaluator {
-            friend_diff_midgame: -self.friend_diff_midgame,
-            friend_diff_endgame: -self.friend_diff_endgame,
-            total_material: self.total_material,
+pub fn eval(gs: &GameState) -> Score {
+    let mut diff_midgame = 0;
+    let mut diff_endgame = 0;
+    let mut total_material = 0;
+    for kind in PieceKind::iter() {
+        let table_midgame = piece_value_table_midgame(kind);
+        let table_endgame = piece_value_table_endgame(kind);
+        let flat_value = piece_value(kind);
+        for sq in SquareIter(gs.friends_bb[kind]) {
+            diff_midgame += table_midgame[sq as usize];
+            diff_endgame += table_endgame[sq as usize];
+            total_material += flat_value;
+        }
+        for sq in SquareIter(gs.enemies_bb[kind]) {
+            diff_midgame -= table_midgame[sq.mirror() as usize];
+            diff_endgame -= table_endgame[sq.mirror() as usize];
+            total_material += flat_value;
         }
     }
 
-    pub fn put_friend_piece(&mut self, at: SquareIndex, kind: PieceKind) {
-        self.total_material += piece_value(kind);
-        self.friend_diff_midgame += piece_value_table_midgame(kind)[at as usize];
-        self.friend_diff_endgame += piece_value_table_endgame(kind)[at as usize];
-    }
-
-    pub fn remove_friend_piece(&mut self, at: SquareIndex, kind: PieceKind) {
-        self.total_material -= piece_value(kind);
-        self.friend_diff_midgame -= piece_value_table_midgame(kind)[at as usize];
-        self.friend_diff_endgame -= piece_value_table_endgame(kind)[at as usize];
-    }
-
-    pub fn put_enemy_piece(&mut self, at: SquareIndex, kind: PieceKind) {
-        self.total_material += piece_value(kind);
-        self.friend_diff_midgame -= piece_value_table_midgame(kind)[at.mirror() as usize];
-        self.friend_diff_endgame -= piece_value_table_endgame(kind)[at.mirror() as usize];
-    }
-
-    pub fn remove_enemy_piece(&mut self, at: SquareIndex, kind: PieceKind) {
-        self.total_material -= piece_value(kind);
-        self.friend_diff_midgame += piece_value_table_midgame(kind)[at.mirror() as usize];
-        self.friend_diff_endgame += piece_value_table_endgame(kind)[at.mirror() as usize];
-    }
+    // Blend the midgame and engame material values
+    // 10000 is considered the beginning of the game, 6000 the end of the game
+    let midgame_factor = ((total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
+    let diff_midgame = diff_midgame as f32 * midgame_factor;
+    let diff_endgame = diff_endgame as f32 * (1.0 - midgame_factor);
+    Score((diff_midgame + diff_endgame).round() as i16)
 }
 
 /// Get the piece-square value table for a kind of piece.
