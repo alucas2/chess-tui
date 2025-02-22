@@ -78,7 +78,7 @@ static TABLE: LazyLock<Table<(), TableValue>> = LazyLock::new(|| Table::new(TABL
 impl Search {
     pub fn start(gs: GameState) -> Self {
         let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
+            .num_threads(3)
             .build_global();
         let result = Arc::new(RwLock::new(SearchResult {
             depth: 1,

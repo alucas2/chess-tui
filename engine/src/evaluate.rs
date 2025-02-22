@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::{GameState, PieceKind, SquareIter};
+use crate::{moves, GameState, PieceKind, SquareIndex, SquareIter};
 
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
@@ -53,31 +53,51 @@ impl AtomicScore {
 }
 
 pub fn eval(gs: &GameState) -> Score {
-    let mut diff_midgame = 0;
-    let mut diff_endgame = 0;
     let mut total_material = 0;
+    let mut material_diff_midgame = 0;
+    let mut material_diff_endgame = 0;
+    let mut bonus = 0;
+    let blockers = gs.friends_bb.union() | gs.enemies_bb.union();
     for kind in PieceKind::iter() {
         let table_midgame = piece_value_table_midgame(kind);
         let table_endgame = piece_value_table_endgame(kind);
         let flat_value = piece_value(kind);
         for sq in SquareIter(gs.friends_bb[kind]) {
-            diff_midgame += table_midgame[sq as usize];
-            diff_endgame += table_endgame[sq as usize];
             total_material += flat_value;
+            material_diff_midgame += table_midgame[sq as usize];
+            material_diff_endgame += table_endgame[sq as usize];
+            bonus += mobility_bonus(kind, sq, blockers);
         }
         for sq in SquareIter(gs.enemies_bb[kind]) {
-            diff_midgame -= table_midgame[sq.mirror() as usize];
-            diff_endgame -= table_endgame[sq.mirror() as usize];
             total_material += flat_value;
+            material_diff_midgame -= table_midgame[sq.mirror() as usize];
+            material_diff_endgame -= table_endgame[sq.mirror() as usize];
+            bonus -= mobility_bonus(kind, sq, blockers);
         }
     }
 
     // Blend the midgame and engame material values
     // 10000 is considered the beginning of the game, 6000 the end of the game
-    let midgame_factor = ((total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
-    let diff_midgame = diff_midgame as f32 * midgame_factor;
-    let diff_endgame = diff_endgame as f32 * (1.0 - midgame_factor);
-    Score((diff_midgame + diff_endgame).round() as i16)
+    let material_diff_blend = {
+        let midgame_factor = ((total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
+        let material_diff_midgame = material_diff_midgame as f32 * midgame_factor;
+        let material_diff_endgame = material_diff_endgame as f32 * (1.0 - midgame_factor);
+        (material_diff_midgame + material_diff_endgame).round() as i16
+    };
+    Score(material_diff_blend + bonus)
+}
+
+fn mobility_bonus(kind: PieceKind, sq: SquareIndex, blockers: u64) -> i16 {
+    match kind {
+        PieceKind::Pawn => 0,
+        PieceKind::Knight => 0,
+        PieceKind::Bishop => moves::bishop_reachable(sq, blockers).count_ones() as i16,
+        PieceKind::Rook => moves::rook_reachable(sq, blockers).count_ones() as i16,
+        PieceKind::Queen => (moves::bishop_reachable(sq, blockers)
+            | moves::rook_reachable(sq, blockers))
+        .count_ones() as i16,
+        PieceKind::King => 0,
+    }
 }
 
 /// Get the piece-square value table for a kind of piece.

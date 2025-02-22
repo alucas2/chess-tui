@@ -422,13 +422,13 @@ fn is_dangerous(sq: SquareIndex, enemies_bb: PieceBitboards, obstacles: u64) -> 
 
 /// Get the squares that are reachable by a knight
 #[inline]
-fn knight_reachable(pos: SquareIndex) -> u64 {
+pub fn knight_reachable(pos: SquareIndex) -> u64 {
     lut::KNIGHT_REACHABLE[pos as usize]
 }
 
 /// Cast rays in all diagonal directions, up to and including the blockers
 #[inline]
-fn bishop_reachable(pos: SquareIndex, blockers: u64) -> u64 {
+pub fn bishop_reachable(pos: SquareIndex, blockers: u64) -> u64 {
     let lut::Rays { ne, nw, se, sw, .. } = lut::RAYS[pos as usize];
     let mut result = ne | nw | se | sw;
     let ne_collision = (ne & blockers) | SquareIndex::H8.bb();
@@ -444,7 +444,7 @@ fn bishop_reachable(pos: SquareIndex, blockers: u64) -> u64 {
 
 /// Cast rays in all orthogonal direction, up to and including the blockers
 #[inline]
-fn rook_reachable(pos: SquareIndex, blockers: u64) -> u64 {
+pub fn rook_reachable(pos: SquareIndex, blockers: u64) -> u64 {
     let lut::Rays { n, s, e, w, .. } = lut::RAYS[pos as usize];
     let mut result = n | s | e | w;
     let n_collision = (n & blockers) | (1 << 63);
@@ -460,7 +460,7 @@ fn rook_reachable(pos: SquareIndex, blockers: u64) -> u64 {
 
 /// Get the square that are reachable by a king
 #[inline]
-fn king_reachable(pos: SquareIndex) -> u64 {
+pub fn king_reachable(pos: SquareIndex) -> u64 {
     lut::KING_REACHABLE[pos as usize]
 }
 

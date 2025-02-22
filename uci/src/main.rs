@@ -102,8 +102,8 @@ impl SearchThread {
                         time_left,
                         time_increment,
                     }) => {
-                        let remaining_moves = (50_f64 - gs.fullmoves() as f64).max(10.0);
-                        let maximum_time_to_think = time_left.mul_f64(0.3);
+                        let remaining_moves = (60_f64 - gs.fullmoves() as f64).max(10.0);
+                        let maximum_time_to_think = time_left.mul_f64(0.5);
                         let time_to_think = (time_left.div_f64(remaining_moves) + time_increment)
                             .min(maximum_time_to_think)
                             .min(Duration::from_secs(9));
@@ -128,8 +128,25 @@ impl SearchThread {
                         let status = search.status();
                         *stop |= Instant::now() > deadline;
                         *stop |= !status.thinking;
+
+                        // Print some info
+                        let score = match status.score {
+                            ScoreInfo::Normal(x) => format!("score cp {x}"),
+                            ScoreInfo::Win(x) => format!("score mate {x}"),
+                            ScoreInfo::Loose(x) => format!("score mate -{x}"),
+                        };
+                        let pv = match status.best {
+                            Some(best) => format!("pv {}", best.info(gs)),
+                            None => format!(""),
+                        };
+                        println!(
+                            "info depth {} nodes {} {pv} {score}",
+                            status.depth,
+                            status.stats.expanded_nodes + status.stats.expanded_nodes_quiescent
+                        );
+
+                        // Stop the search and continue pondering if possible
                         if *stop {
-                            // Stop the search and continue pondering if possible
                             match status.best {
                                 Some(best) => {
                                     println!("bestmove {}", best.info(gs));
@@ -140,22 +157,6 @@ impl SearchThread {
                                 None if !status.thinking => state = SearchState::Waiting,
                                 None => {}
                             }
-                        } else {
-                            // Print some info
-                            let score = match status.score {
-                                ScoreInfo::Normal(x) => format!("score cp {x}"),
-                                ScoreInfo::Win(x) => format!("score mate {x}"),
-                                ScoreInfo::Loose(x) => format!("score mate -{x}"),
-                            };
-                            let pv = match status.best {
-                                Some(best) => format!("pv {}", best.info(gs)),
-                                None => format!(""),
-                            };
-                            println!(
-                                "info depth {} nodes {} {pv} {score}",
-                                status.depth,
-                                status.stats.expanded_nodes + status.stats.expanded_nodes_quiescent
-                            );
                         }
                     }
                     SearchState::Pondering(ref _ponder_token) => {}
