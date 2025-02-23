@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::{moves, GameState, PieceKind, SquareIndex, SquareIter};
+use crate::{lookup_tables as lut, GameState, PieceKind, SquareIndex, SquareIter};
 
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
@@ -91,10 +91,10 @@ fn mobility_bonus(kind: PieceKind, sq: SquareIndex, blockers: u64) -> i16 {
     match kind {
         PieceKind::Pawn => 0,
         PieceKind::Knight => 0,
-        PieceKind::Bishop => moves::bishop_reachable(sq, blockers).count_ones() as i16,
-        PieceKind::Rook => moves::rook_reachable(sq, blockers).count_ones() as i16,
-        PieceKind::Queen => (moves::bishop_reachable(sq, blockers)
-            | moves::rook_reachable(sq, blockers))
+        PieceKind::Bishop => lut::bishop_reachable(sq, blockers).count_ones() as i16,
+        PieceKind::Rook => lut::rook_reachable(sq, blockers).count_ones() as i16,
+        PieceKind::Queen => (lut::bishop_reachable(sq, blockers)
+            | lut::rook_reachable(sq, blockers))
         .count_ones() as i16,
         PieceKind::King => 0,
     }

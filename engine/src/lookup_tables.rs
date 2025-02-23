@@ -1,14 +1,67 @@
+use crate::SquareIndex;
+
+/// Get the square that are reachable by a king
+pub fn king_reachable(pos: SquareIndex) -> u64 {
+    KING_REACHABLE[pos as usize]
+}
+
+/// Get the squares that are reachable by a knight
+pub fn knight_reachable(pos: SquareIndex) -> u64 {
+    KNIGHT_REACHABLE[pos as usize]
+}
+
+/// Cast rays in all diagonal directions, up to and including the blockers
+pub fn bishop_reachable(pos: SquareIndex, blockers: u64) -> u64 {
+    let Rays { ne, nw, se, sw, .. } = RAYS[pos as usize];
+    let mut result = ne | nw | se | sw;
+    let ne_collision = (ne & blockers) | SquareIndex::H8.bb();
+    result ^= RAYS[ne_collision.trailing_zeros() as usize].ne;
+    let nw_collision = (nw & blockers) | SquareIndex::H8.bb();
+    result ^= RAYS[nw_collision.trailing_zeros() as usize].nw;
+    let se_collision = (se & blockers) | SquareIndex::A1.bb();
+    result ^= RAYS[63 - se_collision.leading_zeros() as usize].se;
+    let sw_collision = (sw & blockers) | SquareIndex::A1.bb();
+    result ^= RAYS[63 - sw_collision.leading_zeros() as usize].sw;
+    result
+}
+
+/// Cast rays in all orthogonal direction, up to and including the blockers
+pub fn rook_reachable(pos: SquareIndex, blockers: u64) -> u64 {
+    let Rays { n, s, e, w, .. } = RAYS[pos as usize];
+    let mut result = n | s | e | w;
+    let n_collision = (n & blockers) | (1 << 63);
+    result ^= RAYS[n_collision.trailing_zeros() as usize].n;
+    let e_collision = (e & blockers) | (1 << 63);
+    result ^= RAYS[e_collision.trailing_zeros() as usize].e;
+    let s_collision = (s & blockers) | 1;
+    result ^= RAYS[63 - s_collision.leading_zeros() as usize].s;
+    let w_collision = (w & blockers) | 1;
+    result ^= RAYS[63 - w_collision.leading_zeros() as usize].w;
+    result
+}
+
+/// Get the squares that a piece moves through while castling.
+pub fn castle_ray(from: SquareIndex, to: SquareIndex) -> u64 {
+    let mut result = from.bb().get();
+    if (from as u8) < (to as u8) {
+        result |= RAYS[from as usize].e ^ RAYS[to as usize].e
+    } else {
+        result |= RAYS[from as usize].w ^ RAYS[to as usize].w
+    };
+    result
+}
+
 /// Knight moves from each square (512 bytes)
-pub const KNIGHT_REACHABLE: [u64; 64] = compile_time::generate_knight_lut();
+const KNIGHT_REACHABLE: [u64; 64] = compile_time::generate_knight_lut();
 
 /// King moves from each square (512 bytes)
-pub const KING_REACHABLE: [u64; 64] = compile_time::generate_king_lut();
+const KING_REACHABLE: [u64; 64] = compile_time::generate_king_lut();
 
 /// Rays from each square in each direction (4096 bytes)
-pub const RAYS: [Rays; 64] = compile_time::generate_rays_lut();
+const RAYS: [Rays; 64] = compile_time::generate_rays_lut();
 
 #[derive(Debug, Clone, Copy)]
-pub struct Rays {
+struct Rays {
     pub n: u64,
     pub s: u64,
     pub e: u64,

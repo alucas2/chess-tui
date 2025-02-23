@@ -136,7 +136,7 @@ impl GameState {
             }
             MoveFlag::CastleEast => {
                 let blockers = self.friends_bb.union() | self.enemies_bb.union();
-                for sq in SquareIter(castle_ray(mv.from, SquareIndex::G1)) {
+                for sq in SquareIter(lut::castle_ray(mv.from, SquareIndex::G1)) {
                     if is_dangerous(sq, self.enemies_bb, blockers) {
                         return Err(IllegalMoveError); // Cannot castle through danger
                     }
@@ -148,7 +148,7 @@ impl GameState {
             }
             MoveFlag::CastleWest => {
                 let blockers = self.friends_bb.union() | self.enemies_bb.union();
-                for sq in SquareIter(castle_ray(mv.from, SquareIndex::C1)) {
+                for sq in SquareIter(lut::castle_ray(mv.from, SquareIndex::C1)) {
                     if is_dangerous(sq, self.enemies_bb, blockers) {
                         return Err(IllegalMoveError); // Cannot castle through danger
                     }
@@ -292,7 +292,7 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
 
     // Knight moves
     for from in SquareIter(gs.friends_bb[PieceKind::Knight]) {
-        for to in SquareIter(knight_reachable(from) & dst_mask) {
+        for to in SquareIter(lut::knight_reachable(from) & dst_mask) {
             f(Move {
                 kind: PieceKind::Knight,
                 from,
@@ -304,7 +304,7 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
 
     // Bishop moves
     for from in SquareIter(gs.friends_bb[PieceKind::Bishop]) {
-        for to in SquareIter(bishop_reachable(from, blockers) & dst_mask) {
+        for to in SquareIter(lut::bishop_reachable(from, blockers) & dst_mask) {
             f(Move {
                 kind: PieceKind::Bishop,
                 from,
@@ -316,7 +316,7 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
 
     // Rook moves
     for from in SquareIter(gs.friends_bb[PieceKind::Rook]) {
-        for to in SquareIter(rook_reachable(from, blockers) & dst_mask) {
+        for to in SquareIter(lut::rook_reachable(from, blockers) & dst_mask) {
             f(Move {
                 kind: PieceKind::Rook,
                 from,
@@ -329,7 +329,8 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
     // Queen moves
     for from in SquareIter(gs.friends_bb[PieceKind::Queen]) {
         for to in SquareIter(
-            (bishop_reachable(from, blockers) | rook_reachable(from, blockers)) & dst_mask,
+            (lut::bishop_reachable(from, blockers) | lut::rook_reachable(from, blockers))
+                & dst_mask,
         ) {
             f(Move {
                 kind: PieceKind::Queen,
@@ -342,7 +343,7 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
 
     // King moves
     for from in SquareIter(gs.friends_bb[PieceKind::King]) {
-        for to in SquareIter(king_reachable(from) & dst_mask) {
+        for to in SquareIter(lut::king_reachable(from) & dst_mask) {
             f(Move {
                 kind: PieceKind::King,
                 from,
@@ -374,8 +375,8 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
             if let Some(king_sq) = SquareIter(gs.friends_bb[PieceKind::King]).next() {
                 let rook_sq = SquareIndex::from_coords(file, RankIndex::_1);
                 let blockers = blockers & !king_sq.bb().get() & !rook_sq.bb().get();
-                if castle_ray(king_sq, SquareIndex::G1) & blockers == 0
-                    && castle_ray(rook_sq, SquareIndex::F1) & blockers == 0
+                if lut::castle_ray(king_sq, SquareIndex::G1) & blockers == 0
+                    && lut::castle_ray(rook_sq, SquareIndex::F1) & blockers == 0
                 {
                     f(Move {
                         kind: PieceKind::King,
@@ -390,8 +391,8 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
             if let Some(king_sq) = SquareIter(gs.friends_bb[PieceKind::King]).next() {
                 let rook_sq = SquareIndex::from_coords(file, RankIndex::_1);
                 let blockers = blockers & !king_sq.bb().get() & !rook_sq.bb().get();
-                if castle_ray(king_sq, SquareIndex::C1) & blockers == 0
-                    && castle_ray(rook_sq, SquareIndex::D1) & blockers == 0
+                if lut::castle_ray(king_sq, SquareIndex::C1) & blockers == 0
+                    && lut::castle_ray(rook_sq, SquareIndex::D1) & blockers == 0
                 {
                     f(Move {
                         kind: PieceKind::King,
@@ -411,67 +412,11 @@ fn is_dangerous(sq: SquareIndex, enemies_bb: PieceBitboards, obstacles: u64) -> 
     let sq_bb = sq.bb().get();
     let mut attackers = 0;
     attackers |= (lut::shift_ne(sq_bb) | lut::shift_nw(sq_bb)) & enemies_bb[PieceKind::Pawn];
-    attackers |= knight_reachable(sq) & enemies_bb[PieceKind::Knight];
-    attackers |= bishop_reachable(sq, obstacles)
+    attackers |= lut::knight_reachable(sq) & enemies_bb[PieceKind::Knight];
+    attackers |= lut::bishop_reachable(sq, obstacles)
         & (enemies_bb[PieceKind::Bishop] | enemies_bb[PieceKind::Queen]);
-    attackers |= rook_reachable(sq, obstacles)
+    attackers |= lut::rook_reachable(sq, obstacles)
         & (enemies_bb[PieceKind::Rook] | enemies_bb[PieceKind::Queen]);
-    attackers |= king_reachable(sq) & enemies_bb[PieceKind::King];
+    attackers |= lut::king_reachable(sq) & enemies_bb[PieceKind::King];
     attackers != 0
-}
-
-/// Get the squares that are reachable by a knight
-#[inline]
-pub fn knight_reachable(pos: SquareIndex) -> u64 {
-    lut::KNIGHT_REACHABLE[pos as usize]
-}
-
-/// Cast rays in all diagonal directions, up to and including the blockers
-#[inline]
-pub fn bishop_reachable(pos: SquareIndex, blockers: u64) -> u64 {
-    let lut::Rays { ne, nw, se, sw, .. } = lut::RAYS[pos as usize];
-    let mut result = ne | nw | se | sw;
-    let ne_collision = (ne & blockers) | SquareIndex::H8.bb();
-    result ^= lut::RAYS[ne_collision.trailing_zeros() as usize].ne;
-    let nw_collision = (nw & blockers) | SquareIndex::H8.bb();
-    result ^= lut::RAYS[nw_collision.trailing_zeros() as usize].nw;
-    let se_collision = (se & blockers) | SquareIndex::A1.bb();
-    result ^= lut::RAYS[63 - se_collision.leading_zeros() as usize].se;
-    let sw_collision = (sw & blockers) | SquareIndex::A1.bb();
-    result ^= lut::RAYS[63 - sw_collision.leading_zeros() as usize].sw;
-    result
-}
-
-/// Cast rays in all orthogonal direction, up to and including the blockers
-#[inline]
-pub fn rook_reachable(pos: SquareIndex, blockers: u64) -> u64 {
-    let lut::Rays { n, s, e, w, .. } = lut::RAYS[pos as usize];
-    let mut result = n | s | e | w;
-    let n_collision = (n & blockers) | (1 << 63);
-    result ^= lut::RAYS[n_collision.trailing_zeros() as usize].n;
-    let e_collision = (e & blockers) | (1 << 63);
-    result ^= lut::RAYS[e_collision.trailing_zeros() as usize].e;
-    let s_collision = (s & blockers) | 1;
-    result ^= lut::RAYS[63 - s_collision.leading_zeros() as usize].s;
-    let w_collision = (w & blockers) | 1;
-    result ^= lut::RAYS[63 - w_collision.leading_zeros() as usize].w;
-    result
-}
-
-/// Get the square that are reachable by a king
-#[inline]
-pub fn king_reachable(pos: SquareIndex) -> u64 {
-    lut::KING_REACHABLE[pos as usize]
-}
-
-/// Get the squares that a piece moves through while castling.
-#[inline]
-fn castle_ray(from: SquareIndex, to: SquareIndex) -> u64 {
-    let mut result = from.bb().get();
-    if (from as u8) < (to as u8) {
-        result |= lut::RAYS[from as usize].e ^ lut::RAYS[to as usize].e
-    } else {
-        result |= lut::RAYS[from as usize].w ^ lut::RAYS[to as usize].w
-    };
-    result
 }
