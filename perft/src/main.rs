@@ -40,13 +40,16 @@ fn perft(gs: &GameState, depth: u32, parallel: bool, cache: &Cache) -> u32 {
 
 fn main() {
     // Source: https://github.com/AndyGrant/Ethereal/blob/master/src/perft/standard.epd
-    let perft_results = include_str!("perft_results.txt");
-    let perft_results_chess960 = include_str!("perft_results_chess960.txt");
-    let t0 = std::time::Instant::now();
+    let mut perft_results = include_str!("perft_results.txt").to_string();
+    if std::env::args().any(|arg| arg.contains("960")) {
+        perft_results.push_str("\n");
+        perft_results.push_str(include_str!("perft_results_chess960.txt"));
+    }
 
+    let t0 = std::time::Instant::now();
     let cache = Cache::new(2_usize.pow(22));
     for depth in 0..=6 {
-        for line in perft_results.lines().chain(perft_results_chess960.lines()) {
+        for line in perft_results.lines() {
             // Parse the test line
             let mut split = line.split(";").map(str::trim);
             let fen = split.next().unwrap();
