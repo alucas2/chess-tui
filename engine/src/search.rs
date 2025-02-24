@@ -17,6 +17,7 @@ use crate::{
 
 /// Handle to the search thread
 pub struct Search {
+    gs: GameState,
     result: Arc<RwLock<SearchResult>>,
     stop: Arc<AtomicBool>,
     stats: Arc<RwLock<SearchStatistics>>,
@@ -35,8 +36,8 @@ pub struct SearchStatus {
     /// Score assigned to the searched position
     pub score: ScoreInfo,
     /// Best move from the search position. Is None if no moves are available
-    /// (because the game is lost) or if it's too early in the search to know
-    pub best: Option<Move>,
+    /// because the game is lost or if it's too early in the search to know
+    pub pv: Vec<Move>,
     /// Search performance metrics
     pub stats: SearchStatistics,
     /// Time elapsed
@@ -122,6 +123,7 @@ impl Search {
             })
         };
         Search {
+            gs,
             result,
             stop,
             stats,
@@ -138,6 +140,28 @@ impl Search {
             Some(finish) => (finish - self.start, false),
             None => (self.start.elapsed(), true),
         };
+        let pv = match result.best {
+            Some(mut mv) => {
+                let mut gs = self.gs;
+                let mut pv = vec![mv];
+                let mut seen_positions = vec![];
+                loop {
+                    gs = gs.make_move(mv).expect("PV move should be legal");
+                    let key = TableKey::new(&gs);
+                    if seen_positions.contains(&key) {
+                        break; // PV forms a loop
+                    }
+                    mv = match TABLE.lookup(&key) {
+                        Some(TableValue { best: Some(mv), .. }) => mv,
+                        _ => break, // PV stops here
+                    };
+                    pv.push(mv);
+                    seen_positions.push(key);
+                }
+                pv
+            }
+            None => vec![],
+        };
         SearchStatus {
             thinking,
             depth: result.depth,
@@ -146,7 +170,7 @@ impl Search {
                 Score::MIN => ScoreInfo::Loose(result.depth - 1),
                 Score(x) => ScoreInfo::Normal(x),
             },
-            best: result.best,
+            pv,
             stats,
             elapsed,
         }
@@ -199,7 +223,7 @@ fn eval_minmax_pv_split(
     };
 
     // Lookup in the table
-    let table_key = TableKey::new(gs, ());
+    let table_key = TableKey::new(gs);
     let table_move = match tt.lookup(&table_key) {
         Some(e) if e.depth == depth => {
             stat.table_hits += 1;
@@ -313,7 +337,7 @@ fn eval_minmax(
     }
 
     // Lookup in the table
-    let table_key = TableKey::new(gs, ());
+    let table_key = TableKey::new(gs);
     let table_move = match tt.lookup(&table_key) {
         Some(e) if e.depth == depth => {
             stat.table_hits += 1;

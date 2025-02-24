@@ -135,9 +135,16 @@ impl SearchThread {
                             ScoreInfo::Win(x) => format!("score mate {x}"),
                             ScoreInfo::Loose(x) => format!("score mate -{x}"),
                         };
-                        let pv = match status.best {
-                            Some(best) => format!("pv {}", best.info(gs)),
-                            None => format!(""),
+                        let pv = if status.pv.is_empty() {
+                            "".to_string()
+                        } else {
+                            let mut string = String::new();
+                            let mut gs = *gs;
+                            for mv in &status.pv {
+                                string = format!("{string} {}", mv.info(&gs));
+                                gs = gs.make_move(*mv).expect("PV move should be legal");
+                            }
+                            format!("pv {string}")
                         };
                         println!(
                             "info depth {} nodes {} {pv} {score}",
@@ -147,11 +154,11 @@ impl SearchThread {
 
                         // Stop the search and continue pondering if possible
                         if *stop {
-                            match status.best {
+                            match status.pv.first() {
                                 Some(best) => {
                                     println!("bestmove {}", best.info(gs));
                                     let next_gs =
-                                        gs.make_move(best).expect("Best move should be legal");
+                                        gs.make_move(*best).expect("Best move should be legal");
                                     state = SearchState::Pondering(Search::start(next_gs));
                                 }
                                 None if !status.thinking => state = SearchState::Waiting,

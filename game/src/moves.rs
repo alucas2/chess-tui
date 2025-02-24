@@ -34,6 +34,16 @@ pub enum MoveOutcome {
     CheckMate,
 }
 
+/// Get the human notation for a move
+pub fn human_notation(mv: Move, gs: &GameState) -> String {
+    moves_with_notation(gs)
+        .iter()
+        .find(|mvn| mvn.inner == mv)
+        .expect("Should call this function on a legal move")
+        .to_string()
+}
+
+/// Compute the legal moves from a gamestate, with their human notation
 pub fn moves_with_notation(gs: &GameState) -> Vec<MoveWithNotation> {
     let mut moves = vec![];
     gs.pseudo_legal_moves(|mv| moves.push(mv));

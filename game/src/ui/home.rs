@@ -7,7 +7,12 @@ use ratatui::{
     widgets::{Block, Gauge, Padding, Paragraph, Widget},
 };
 
-use crate::{custom_widgets, game_state::GameStateHistory, moves::MoveWithNotation, style, util};
+use crate::{
+    custom_widgets,
+    game_state::GameStateHistory,
+    moves::{self, MoveWithNotation},
+    style, util,
+};
 
 use super::{
     newgame_popup::NewGamePopup, promotion_popup::PromotionPopup, IState, State, UiLayout,
@@ -239,19 +244,20 @@ impl Home {
             )
             .render(gauge_area, buf);
 
-        let depth = result.depth;
-        let stats = result.stats;
-        let best = match result.best {
-            Some(best) => {
-                let mut available_moves = self.gamestate.available_moves().iter();
-                &available_moves
-                    .find(|mv| mv.inner == best)
-                    .expect("Search should have found a legal move")
-                    .to_string()
+        // Formatting the PV requires to retrace the sequence of gamestates
+        let pv = {
+            let mut string = String::new();
+            let mut gs = *self.gamestate.current();
+            for mv in result.pv {
+                string = format!("{string} {}", moves::human_notation(mv, &gs));
+                gs = gs.make_move(mv).expect("PV move should be legal");
             }
-            None => "None",
+            string
         };
-        let text = format!("Depth: {depth}\nBest: {best}\n{stats:#?}");
+
+        let stats = result.stats;
+        let depth = result.depth;
+        let text = format!("Depth: {depth}\nPV:{pv}\n{stats:#?}");
         block.render(layout.ponder_panel, buf);
         Paragraph::new(text).render(paragraph_area, buf);
     }
@@ -295,10 +301,10 @@ impl IState for Home {
             Some(KeyCode::Char('s')) => self.pending_search = None,
             Some(KeyCode::Char('a')) => match &self.pending_search {
                 Some(search) => {
-                    if let Some(best) = search.status().best {
+                    if let Some(best) = search.status().pv.first() {
                         let mut available_moves = self.gamestate.available_moves().iter();
                         let mv = available_moves
-                            .find(|mv| mv.inner == best)
+                            .find(|mv| mv.inner == *best)
                             .expect("Search should have found a legal move");
                         self.do_move(*mv);
                     }
@@ -350,7 +356,7 @@ impl IState for Home {
         match &self.pending_search {
             Some(search) => {
                 bottom_bar.push("S", "Stop analysing");
-                if search.status().best.is_some() {
+                if !search.status().pv.is_empty() {
                     bottom_bar.push("A", "Auto move")
                 }
             }

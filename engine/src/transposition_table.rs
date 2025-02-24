@@ -15,9 +15,10 @@ pub struct Table<X, V> {
     entries: Vec<AtomicCell<Option<Entry<X, V>>>>,
 }
 
+#[derive(PartialEq, Eq)]
 pub struct TableKey<X> {
-    tag: Tag<X>,
     hash: u64,
+    tag: Tag<X>,
 }
 
 /// size is at least: 36 + sizeof::<X>
@@ -37,8 +38,14 @@ struct Entry<X, V> {
     value: V,
 }
 
+impl TableKey<()> {
+    pub fn new(gs: &GameState) -> TableKey<()> {
+        TableKey::with_extra(gs, ())
+    }
+}
+
 impl<X: Hash> TableKey<X> {
-    pub fn new(gs: &GameState, extra: X) -> TableKey<X> {
+    pub fn with_extra(gs: &GameState, extra: X) -> TableKey<X> {
         let tag = Tag {
             pieces: gs.pieces,
             side_to_move: gs.side_to_move,

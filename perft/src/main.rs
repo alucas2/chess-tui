@@ -13,7 +13,7 @@ fn perft(gs: &GameState, depth: u32, parallel: bool, cache: &Cache) -> u32 {
     if depth == 0 {
         return 1;
     }
-    let key = TableKey::new(gs, depth);
+    let key = TableKey::with_extra(gs, depth);
     match cache.lookup(&key) {
         Some(value) => value,
         None => {
