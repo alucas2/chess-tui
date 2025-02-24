@@ -114,7 +114,6 @@ impl GameState {
     /// Remove a piece from the board while keeping the internal data consistent.
     /// Ensure that the expected piece is on specified square before calling this function,
     /// or else corruption will occur.
-    #[inline]
     pub(crate) fn remove_piece(&mut self, at: SquareIndex, side: PlayerSide, kind: PieceKind) {
         self.pieces.set(at, None);
         if side == self.side_to_move {
@@ -127,7 +126,6 @@ impl GameState {
     /// Put a piece on the board while keepking the internal data consistent.
     /// Ensure that no piece occupies the specified square before calling this function,
     /// or else corruption will occur.
-    #[inline]
     pub(crate) fn put_piece(&mut self, at: SquareIndex, side: PlayerSide, kind: PieceKind) {
         self.pieces.set(at, Some((side, kind)));
         if side == self.side_to_move {
@@ -139,12 +137,10 @@ impl GameState {
 }
 
 impl PieceBitboards {
-    #[inline]
     pub(crate) fn mirror(self) -> PieceBitboards {
         PieceBitboards(self.0.map(u64::swap_bytes))
     }
 
-    #[inline]
     pub(crate) fn union(self) -> u64 {
         self.0.iter().fold(0, |a, b| a | b)
     }
@@ -153,14 +149,12 @@ impl PieceBitboards {
 impl std::ops::Index<PieceKind> for PieceBitboards {
     type Output = u64;
 
-    #[inline]
     fn index(&self, kind: PieceKind) -> &u64 {
         &self.0[kind as usize]
     }
 }
 
 impl std::ops::IndexMut<PieceKind> for PieceBitboards {
-    #[inline]
     fn index_mut(&mut self, kind: PieceKind) -> &mut u64 {
         &mut self.0[kind as usize]
     }
@@ -173,7 +167,6 @@ impl Default for CompactPieceArray {
 }
 
 impl CompactPieceArray {
-    #[inline]
     pub(crate) fn get(&self, sq: SquareIndex) -> Option<(PlayerSide, PieceKind)> {
         // Get the 4-bit integer representing the content of the square
         // b3 represents the side of the piece
@@ -197,7 +190,6 @@ impl CompactPieceArray {
         Some((side, kind))
     }
 
-    #[inline]
     pub(crate) fn set(&mut self, sq: SquareIndex, value: Option<(PlayerSide, PieceKind)>) {
         let i = sq as usize;
         let mask = 0b1111;
@@ -208,7 +200,6 @@ impl CompactPieceArray {
         }
     }
 
-    #[inline]
     pub(crate) fn mirror(&self) -> CompactPieceArray {
         CompactPieceArray([
             self.0[3].rotate_left(32),

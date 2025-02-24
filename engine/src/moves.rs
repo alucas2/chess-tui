@@ -407,7 +407,6 @@ fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F
 }
 
 /// Check whether a square is attackable by an enemy
-#[inline]
 fn is_dangerous(sq: SquareIndex, enemies_bb: PieceBitboards, obstacles: u64) -> bool {
     let sq_bb = sq.bb().get();
     let mut attackers = 0;
