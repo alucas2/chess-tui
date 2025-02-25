@@ -172,11 +172,11 @@ impl FileIndex {
         })
     }
 
-    // pub(crate) const fn bb(self) -> NonZeroU64 {
-    //     // Safety: self is in 0..=7 so 'bb' is non zero
-    //     let bb = 0x0101010101010101 << (self as u8);
-    //     unsafe { NonZeroU64::new_unchecked(bb) }
-    // }
+    pub(crate) const fn bb(self) -> NonZeroU64 {
+        // Safety: self is in 0..=7 so 'bb' is non zero
+        let bb = 0x0101010101010101 << (self as u8);
+        unsafe { NonZeroU64::new_unchecked(bb) }
+    }
 }
 
 impl RankIndex {

@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::{lookup_tables as lut, GameState, PieceKind, SquareIndex, SquareIter};
+use crate::{lookup_tables as lut, FileIndex, GameState, PieceKind, SquareIndex, SquareIter};
 
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
@@ -73,6 +73,17 @@ pub fn eval(gs: &GameState) -> Score {
             material_diff_midgame -= table_midgame[sq.mirror() as usize];
             material_diff_endgame -= table_endgame[sq.mirror() as usize];
             bonus -= mobility_bonus(kind, sq, blockers);
+        }
+    }
+
+    // Malus for multiple pawns on the same file
+    for file in FileIndex::iter() {
+        let bb = file.bb().get();
+        if (gs.friends_bb[PieceKind::Pawn] & bb).count_ones() > 1 {
+            bonus -= piece_value(PieceKind::Pawn) / 2;
+        }
+        if (gs.enemies_bb[PieceKind::Pawn] & bb).count_ones() > 1 {
+            bonus += piece_value(PieceKind::Pawn) / 2;
         }
     }
 

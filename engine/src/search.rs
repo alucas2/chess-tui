@@ -101,8 +101,6 @@ impl Search {
                     let mut new_stats = SearchStatistics::default();
                     let final_score = eval_minmax_pv_split(
                         &gs,
-                        Score::MIN,
-                        Score::MAX,
                         depth,
                         &stop,
                         &TABLE,
@@ -194,8 +192,6 @@ struct MoveWithKey {
 
 fn eval_minmax_pv_split(
     gs: &GameState,
-    mut alpha: Score,
-    beta: Score,
     depth: u16,
     stop: &AtomicBool,
     tt: &Table<(), TableValue>,
@@ -203,7 +199,7 @@ fn eval_minmax_pv_split(
     argmax: Option<&RwLock<SearchResult>>,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
-        return Ok(eval_quiescent(gs, alpha, beta, stop, stat)?);
+        return Ok(eval_quiescent(gs, Score::MIN, Score::MAX, stop, stat)?);
     }
     if stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
@@ -234,73 +230,69 @@ fn eval_minmax_pv_split(
         None => None,
     };
 
+    let mut alpha = Score::MIN;
+    let beta = Score::MAX;
     let mut score = Score::NEG_INF;
     let mut best = None;
 
     stat.expanded_nodes += 1;
     let mut branches = Branches::new(table_move);
-    'cutoff: {
-        // Search the first branch first, passing the parallel flag
-        // This method is called PV-splitting
-        while let Some(mv) = branches.next(|| generate_moves(gs)) {
-            let Ok(next) = gs.make_move(mv) else {
-                continue;
-            };
-            let branch_score =
-                -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, stop, tt, stat, None)?;
-            best = Some(mv);
-            compare_update_argmax(branch_score, best);
-            score = score.max(branch_score);
-            alpha = alpha.max(score);
-            if alpha >= beta {
-                break 'cutoff;
-            }
-            break; // First branch exploration complete
-        }
-
-        // Search the remaining branches in parallel
-        let shared_alpha = AtomicScore::new(alpha);
-        let shared_score_best = Mutex::new((score, best));
-        let shared_stat = Mutex::new(stat);
-        std::iter::from_fn(|| branches.next(|| generate_moves(gs)))
-            .par_bridge()
-            .try_for_each(|mv| {
-                let Ok(next) = gs.make_move(mv) else {
-                    return Ok(()); // Illegal move
-                };
-
-                // Read the shared alpha value that other threads might have updated
-                let alpha = shared_alpha.load();
-                if alpha >= beta {
-                    return Ok(()); // Cutoff
-                }
-                let mut stat = SearchStatistics::default();
-                let mut mp = MovePredictor::new(depth);
-                let branch_score = -eval_minmax(
-                    &next,
-                    -beta,
-                    -alpha,
-                    depth - 1,
-                    stop,
-                    tt,
-                    &mut mp,
-                    &mut stat,
-                )?;
-                shared_stat.lock().unwrap().add(&stat);
-
-                // Lock score and best together to keep them in sync
-                let mut score_best = shared_score_best.lock().unwrap();
-                if branch_score > score_best.0 {
-                    score_best.1 = Some(mv);
-                    compare_update_argmax(branch_score, score_best.1);
-                }
-                score_best.0 = score_best.0.max(branch_score);
-                shared_alpha.fetch_max(score_best.0);
-                Ok(())
-            })?;
-        (score, best) = shared_score_best.into_inner().unwrap();
-        stat = shared_stat.into_inner().unwrap();
+    // Search the first branch first, passing the parallel flag
+    // This method is called PV-splitting
+    while let Some(mv) = branches.next(|| generate_moves(gs)) {
+        let Ok(next) = gs.make_move(mv) else {
+            continue;
+        };
+        let branch_score = -eval_minmax_pv_split(&next, depth - 1, stop, tt, stat, None)?;
+        best = Some(mv);
+        compare_update_argmax(branch_score, best);
+        score = score.max(branch_score);
+        alpha = alpha.max(score);
+        break; // First branch exploration complete
     }
+
+    // Search the remaining branches in parallel
+    let shared_alpha = AtomicScore::new(alpha);
+    let shared_score_best = Mutex::new((score, best));
+    let shared_stat = Mutex::new(stat);
+    std::iter::from_fn(|| branches.next(|| generate_moves(gs)))
+        .par_bridge()
+        .try_for_each(|mv| {
+            let Ok(next) = gs.make_move(mv) else {
+                return Ok(()); // Illegal move
+            };
+
+            // Read the shared alpha value that other threads might have updated
+            let alpha = shared_alpha.load();
+            if alpha >= beta {
+                return Ok(()); // Cutoff
+            }
+            let mut stat = SearchStatistics::default();
+            let mut mp = MovePredictor::new(depth);
+            let branch_score = -eval_minmax(
+                &next,
+                -beta,
+                -alpha,
+                depth - 1,
+                stop,
+                tt,
+                &mut mp,
+                &mut stat,
+            )?;
+            shared_stat.lock().unwrap().add(&stat);
+
+            // Lock score and best together to keep them in sync
+            let mut score_best = shared_score_best.lock().unwrap();
+            if branch_score > score_best.0 {
+                score_best.1 = Some(mv);
+                compare_update_argmax(branch_score, score_best.1);
+            }
+            score_best.0 = score_best.0.max(branch_score);
+            shared_alpha.fetch_max(score_best.0);
+            Ok(())
+        })?;
+    (score, best) = shared_score_best.into_inner().unwrap();
+    stat = shared_stat.into_inner().unwrap();
 
     // NEG_INF means that this position is a dead end, so either checkmate or stalemate
     if score == Score::NEG_INF {
