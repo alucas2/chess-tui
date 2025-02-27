@@ -11,7 +11,7 @@ pub fn random_chess960_position() -> GameState {
 
     // Place the bishops
     for i in 0..2 {
-        let file = FileIndex::from_u8(rand::random_range(0..4) * 2 + i).unwrap();
+        let file = FileIndex::from_index(rand::random_range(0..4) * 2 + i).unwrap();
         gs.set_piece(
             SquareIndex::from_coords(file, RankIndex::_1),
             Some((PlayerSide::White, PieceKind::Bishop)),
@@ -25,7 +25,7 @@ pub fn random_chess960_position() -> GameState {
     // Place the knights and queens
     for kind in [PieceKind::Knight, PieceKind::Knight, PieceKind::Queen] {
         let file = std::iter::repeat_with(|| rand::random_range(0..8))
-            .map(|x| FileIndex::from_u8(x).unwrap())
+            .map(|x| FileIndex::from_index(x).unwrap())
             .find(|x| {
                 gs.piece(SquareIndex::from_coords(*x, RankIndex::_1))
                     .is_none()

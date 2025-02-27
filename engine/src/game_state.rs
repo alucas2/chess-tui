@@ -219,11 +219,11 @@ impl Default for CastleRights {
 
 impl CastleRights {
     pub fn east(&self) -> Option<FileIndex> {
-        FileIndex::from_u8(self.0 & 0b00001111)
+        FileIndex::from_index(self.0 & 0b00001111)
     }
 
     pub fn west(&self) -> Option<FileIndex> {
-        FileIndex::from_u8(self.0 >> 4)
+        FileIndex::from_index(self.0 >> 4)
     }
 
     pub fn set_east(&mut self, value: Option<FileIndex>) {

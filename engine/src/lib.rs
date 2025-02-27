@@ -59,11 +59,12 @@ pub enum SquareIndex {
 }
 
 /// An iterator over the set squares if a bitboard.
-pub(crate) struct SquareIter(pub u64);
+pub struct SquareIter(pub u64);
 
 impl Iterator for SquareIter {
     type Item = SquareIndex;
 
+    #[inline]
     fn next(&mut self) -> Option<SquareIndex> {
         let sq = NonZeroU64::new(self.0).map(SquareIndex::from_bb)?;
         self.0 &= self.0 - 1;
@@ -72,9 +73,16 @@ impl Iterator for SquareIter {
 }
 
 impl PieceKind {
+    #[inline]
+    pub const fn from_index(index: u8) -> Option<PieceKind> {
+        match index {
+            0..=5 => Some(unsafe { std::mem::transmute(index) }),
+            _ => None,
+        }
+    }
+
     pub fn iter() -> impl DoubleEndedIterator<Item = PieceKind> {
-        // Safety: index is in 0..=5
-        (0..6_u8).map(|index| unsafe { std::mem::transmute(index) })
+        (0..=5).map(|index| PieceKind::from_index(index).unwrap())
     }
 
     pub fn label(&self) -> char {
@@ -126,9 +134,16 @@ impl PlayerSide {
 }
 
 impl FileIndex {
+    #[inline]
+    pub const fn from_index(index: u8) -> Option<FileIndex> {
+        match index {
+            0..=7 => Some(unsafe { std::mem::transmute(index) }),
+            _ => None,
+        }
+    }
+
     pub fn iter() -> impl DoubleEndedIterator<Item = FileIndex> {
-        // Safety: index is in 0..=7
-        (0..8_u8).map(|index| unsafe { std::mem::transmute(index) })
+        (0..=7).map(|index| FileIndex::from_index(index).unwrap())
     }
 
     pub fn label(&self) -> char {
@@ -158,31 +173,23 @@ impl FileIndex {
         })
     }
 
-    pub fn from_u8(x: u8) -> Option<FileIndex> {
-        Some(match x {
-            0 => FileIndex::A,
-            1 => FileIndex::B,
-            2 => FileIndex::C,
-            3 => FileIndex::D,
-            4 => FileIndex::E,
-            5 => FileIndex::F,
-            6 => FileIndex::G,
-            7 => FileIndex::H,
-            _ => return None,
-        })
-    }
-
-    pub(crate) const fn bb(self) -> NonZeroU64 {
-        // Safety: self is in 0..=7 so 'bb' is non zero
-        let bb = 0x0101010101010101 << (self as u8);
-        unsafe { NonZeroU64::new_unchecked(bb) }
+    #[inline]
+    pub const fn bb(self) -> NonZeroU64 {
+        NonZeroU64::new(0x0101010101010101 << (self as u8)).unwrap()
     }
 }
 
 impl RankIndex {
+    #[inline]
+    pub const fn from_index(index: u8) -> Option<RankIndex> {
+        match index {
+            0..=7 => Some(unsafe { std::mem::transmute(index) }),
+            _ => None,
+        }
+    }
+
     pub fn iter() -> impl DoubleEndedIterator<Item = RankIndex> {
-        // Safety: index is in 0..=7
-        (0..8_u8).map(|index| unsafe { std::mem::transmute(index) })
+        (0..=7).map(|index| RankIndex::from_index(index).unwrap())
     }
 
     pub fn label(&self) -> char {
@@ -212,51 +219,54 @@ impl RankIndex {
         })
     }
 
-    pub(crate) const fn bb(self) -> NonZeroU64 {
-        // Safety: self is in 0..=7 so bb is non zero
-        let bb = 0xff << (8 * self as u8);
-        unsafe { NonZeroU64::new_unchecked(bb) }
+    #[inline]
+    pub const fn bb(self) -> NonZeroU64 {
+        NonZeroU64::new(0xff << (8 * self as u8)).unwrap()
     }
 
-    pub(crate) const fn mirror(self) -> RankIndex {
-        // Safety: self is in 0..=7 so index is too
-        let index = 7 - self as u8;
-        unsafe { std::mem::transmute(index) }
+    #[inline]
+    pub const fn mirror(self) -> RankIndex {
+        RankIndex::from_index(7 - self as u8).unwrap()
     }
 }
 
 impl SquareIndex {
-    pub const fn from_coords(file: FileIndex, rank: RankIndex) -> SquareIndex {
-        // Safety: rank is in 0..=7 and file is in 0..=7, thus index is in 0..=63
-        let index = 8 * rank as u8 + file as u8;
-        unsafe { std::mem::transmute(index) }
+    #[inline]
+    pub const fn from_index(index: u8) -> Option<SquareIndex> {
+        match index {
+            0..=63 => Some(unsafe { std::mem::transmute(index) }),
+            _ => None,
+        }
     }
 
+    #[inline]
+    pub const fn from_coords(file: FileIndex, rank: RankIndex) -> SquareIndex {
+        SquareIndex::from_index(8 * rank as u8 + file as u8).unwrap()
+    }
+
+    #[inline]
     pub const fn coords(self) -> (FileIndex, RankIndex) {
-        // Safety: division and modulo results are in 0..=7
-        let file = unsafe { std::mem::transmute(self as u8 % 8) };
-        let rank = unsafe { std::mem::transmute(self as u8 / 8) };
+        let file = FileIndex::from_index(self as u8 % 8).unwrap();
+        let rank = RankIndex::from_index(self as u8 / 8).unwrap();
         (file, rank)
     }
 
     pub fn iter() -> impl DoubleEndedIterator<Item = SquareIndex> {
-        // Safety: index is in 0..=64
-        (0..64_u8).map(|index| unsafe { std::mem::transmute(index) })
+        (0..=63).map(|index| SquareIndex::from_index(index).unwrap())
     }
 
-    pub(crate) const fn from_bb(bb: NonZeroU64) -> SquareIndex {
-        // Safety: bb in nonzero so n is in range 0..=63
-        let index = bb.trailing_zeros() as u8;
-        unsafe { std::mem::transmute(index) }
+    #[inline]
+    pub const fn from_bb(bb: NonZeroU64) -> SquareIndex {
+        SquareIndex::from_index(bb.trailing_zeros() as u8).unwrap()
     }
 
-    pub(crate) const fn bb(self) -> NonZeroU64 {
-        // Safety: self is in 0..=63 so bb is non zero
-        let bb = 1 << (self as i32);
-        unsafe { NonZeroU64::new_unchecked(bb) }
+    #[inline]
+    pub const fn bb(self) -> NonZeroU64 {
+        NonZeroU64::new(1 << (self as i32)).unwrap()
     }
 
-    pub(crate) const fn mirror(self) -> SquareIndex {
+    #[inline]
+    pub const fn mirror(self) -> SquareIndex {
         let (file, rank) = self.coords();
         SquareIndex::from_coords(file, rank.mirror())
     }
