@@ -1,4 +1,4 @@
-use crate::{evaluate, GameState, Move, PlayerSide};
+use crate::{evaluate, GameState, Move, MoveInfo, PlayerSide};
 
 const NUM_KILLER_MOVES: usize = 3;
 
@@ -9,13 +9,14 @@ pub struct MovePredictor {
     /// History of cutoffs from black moves
     history_black: [[u8; 64]; 6],
     /// Killer moves that caused a cutoff, for each depth
-    killer_moves: Vec<[Option<Move>; NUM_KILLER_MOVES]>,
+    killer_moves: Vec<[Option<MoveInfo>; NUM_KILLER_MOVES]>,
 }
 
 /// Make a fast evaluation of a move.
 /// NOTE: The "score" returned by this function has nothing to do with
 /// the "score" of a gamestate, the latter being represented by the `Score` type.
 pub fn eval(gs: &GameState, mv: Move) -> i16 {
+    let mv = mv.unwrap();
     const CAPTURE_MULT: i16 = 20;
     if let Some((_, victim)) = gs.pieces.get(mv.to) {
         // Bonus for capturing an enemy with a cheap friend
@@ -36,6 +37,7 @@ impl MovePredictor {
 
     /// Make a fast evaluation of a move, with a stateful evaluator for better accuracy.
     pub fn eval(&self, gs: &GameState, mv: Move, depth: u16) -> i16 {
+        let mv = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
         if let Some((_, victim)) = gs.pieces.get(mv.to) {
@@ -62,6 +64,7 @@ impl MovePredictor {
     }
 
     pub fn apply_cutoff_bonus(&mut self, gs: &GameState, mv: Move, depth: u16) {
+        let mv = mv.unwrap();
         if gs.pieces.get(mv.to).is_none() {
             // Store as a killer move
             let killer_moves = &mut self.killer_moves[depth as usize];

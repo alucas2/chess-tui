@@ -1,4 +1,4 @@
-use crate::{FileIndex, GameState, PieceKind, PlayerSide, RankIndex, SquareIndex};
+use crate::{CastleSide, FileIndex, GameState, PieceKind, PlayerSide, RankIndex, SquareIndex};
 
 /// An error raised when a FEN string could not be parsed.
 #[derive(Debug, Clone, Copy)]
@@ -75,25 +75,25 @@ mod unparse {
     }
 
     fn castle_availability(gs: &GameState, result: &mut String) {
-        if gs.castle(PlayerSide::White).east().is_none()
-            && gs.castle(PlayerSide::White).west().is_none()
-            && gs.castle(PlayerSide::Black).east().is_none()
-            && gs.castle(PlayerSide::Black).west().is_none()
-        {
+        let mut any = false;
+        if let Some(x) = gs.castle(PlayerSide::White).get(CastleSide::East) {
+            result.push(x.label().to_ascii_uppercase());
+            any = true;
+        }
+        if let Some(x) = gs.castle(PlayerSide::White).get(CastleSide::West) {
+            result.push(x.label().to_ascii_uppercase());
+            any = true;
+        }
+        if let Some(x) = gs.castle(PlayerSide::Black).get(CastleSide::East) {
+            result.push(x.label().to_ascii_lowercase());
+            any = true;
+        }
+        if let Some(x) = gs.castle(PlayerSide::Black).get(CastleSide::West) {
+            result.push(x.label().to_ascii_lowercase());
+            any = true;
+        }
+        if !any {
             result.push('-');
-        } else {
-            if let Some(x) = gs.castle(PlayerSide::White).east() {
-                result.push(x.label().to_ascii_uppercase());
-            }
-            if let Some(x) = gs.castle(PlayerSide::White).west() {
-                result.push(x.label().to_ascii_uppercase());
-            }
-            if let Some(x) = gs.castle(PlayerSide::Black).east() {
-                result.push(x.label().to_ascii_lowercase());
-            }
-            if let Some(x) = gs.castle(PlayerSide::Black).west() {
-                result.push(x.label().to_ascii_lowercase());
-            }
         }
     }
 
@@ -201,16 +201,16 @@ mod parse {
                 match char {
                     'K' => gs
                         .castle_mut(PlayerSide::White)
-                        .set_east(Some(FileIndex::H)),
+                        .set(CastleSide::East, Some(FileIndex::H)),
                     'Q' => gs
                         .castle_mut(PlayerSide::White)
-                        .set_west(Some(FileIndex::A)),
+                        .set(CastleSide::West, Some(FileIndex::A)),
                     'k' => gs
                         .castle_mut(PlayerSide::Black)
-                        .set_east(Some(FileIndex::H)),
+                        .set(CastleSide::East, Some(FileIndex::H)),
                     'q' => gs
                         .castle_mut(PlayerSide::Black)
-                        .set_west(Some(FileIndex::A)),
+                        .set(CastleSide::West, Some(FileIndex::A)),
                     c => match FileIndex::parse(c.to_ascii_lowercase()) {
                         Some(file) => {
                             let side = if c.is_ascii_uppercase() {
@@ -223,9 +223,9 @@ mod parse {
                                 .map(|sq| sq.coords())
                             {
                                 if (file as u8) < (king_file as u8) {
-                                    gs.castle_mut(side).set_west(Some(file));
+                                    gs.castle_mut(side).set(CastleSide::West, Some(file));
                                 } else if (file as u8) > (king_file as u8) {
-                                    gs.castle_mut(side).set_east(Some(file));
+                                    gs.castle_mut(side).set(CastleSide::East, Some(file));
                                 }
                             } else {
                                 return Err(ParseError);

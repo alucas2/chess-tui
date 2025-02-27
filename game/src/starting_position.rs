@@ -1,4 +1,4 @@
-use engine::{FileIndex, GameState, PieceKind, PlayerSide, RankIndex, SquareIndex};
+use engine::{CastleSide, FileIndex, GameState, PieceKind, PlayerSide, RankIndex, SquareIndex};
 
 pub fn initial_position() -> GameState {
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -66,16 +66,20 @@ pub fn random_chess960_position() -> GameState {
             Some((_, PieceKind::Rook)),
         )
     });
-    gs.castle_mut(PlayerSide::White).set_west(west_rook);
-    gs.castle_mut(PlayerSide::Black).set_west(west_rook);
+    gs.castle_mut(PlayerSide::White)
+        .set(CastleSide::West, west_rook);
+    gs.castle_mut(PlayerSide::Black)
+        .set(CastleSide::West, west_rook);
     let east_rook = FileIndex::iter().rev().find(|x| {
         matches!(
             gs.piece(SquareIndex::from_coords(*x, RankIndex::_1)),
             Some((_, PieceKind::Rook)),
         )
     });
-    gs.castle_mut(PlayerSide::White).set_east(east_rook);
-    gs.castle_mut(PlayerSide::Black).set_east(east_rook);
+    gs.castle_mut(PlayerSide::White)
+        .set(CastleSide::East, east_rook);
+    gs.castle_mut(PlayerSide::Black)
+        .set(CastleSide::East, east_rook);
 
     gs
 }

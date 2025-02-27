@@ -1,4 +1,4 @@
-use crate::{FileIndex, PieceKind, PlayerSide, SquareIndex};
+use crate::{CastleSide, FileIndex, PieceKind, PlayerSide, SquareIndex};
 
 /// State of the game.
 ///
@@ -212,31 +212,28 @@ impl CompactPieceArray {
 
 impl Default for CastleRights {
     fn default() -> Self {
-        // En passant is all 1 to represent the absence of it
         CastleRights(0b11111111)
     }
 }
 
 impl CastleRights {
-    pub fn east(&self) -> Option<FileIndex> {
-        FileIndex::from_index(self.0 & 0b00001111)
-    }
-
-    pub fn west(&self) -> Option<FileIndex> {
-        FileIndex::from_index(self.0 >> 4)
-    }
-
-    pub fn set_east(&mut self, value: Option<FileIndex>) {
-        match value {
-            Some(file) => self.0 = (self.0 & 0b11110000) | file as u8,
-            None => self.0 = (self.0 & 0b11110000) | 0b00001111,
+    pub fn get(&self, castle_side: CastleSide) -> Option<FileIndex> {
+        match castle_side {
+            CastleSide::East => FileIndex::from_index(self.0 & 0b00001111),
+            CastleSide::West => FileIndex::from_index(self.0 >> 4),
         }
     }
 
-    pub fn set_west(&mut self, value: Option<FileIndex>) {
-        match value {
-            Some(file) => self.0 = (self.0 & 0b00001111) | (file as u8) << 4,
-            None => self.0 = (self.0 & 0b00001111) | 0b11110000,
+    pub fn set(&mut self, castle_side: CastleSide, value: Option<FileIndex>) {
+        match castle_side {
+            CastleSide::East => match value {
+                Some(file) => self.0 = (self.0 & 0b11110000) | file as u8,
+                None => self.0 = (self.0 & 0b11110000) | 0b00001111,
+            },
+            CastleSide::West => match value {
+                Some(file) => self.0 = (self.0 & 0b00001111) | (file as u8) << 4,
+                None => self.0 = (self.0 & 0b00001111) | 0b11110000,
+            },
         }
     }
 }

@@ -58,6 +58,12 @@ pub enum SquareIndex {
     A8, B8, C8, D8, E8, F8, G8, H8 = 63,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CastleSide {
+    East,
+    West,
+}
+
 /// An iterator over the set squares if a bitboard.
 pub struct SquareIter(pub u64);
 
