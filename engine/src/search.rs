@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::{
     evaluate::{self, AtomicScore, Score},
     move_predictor::{self, MovePredictor},
-    GameState, Move, ScoreInfo, Table, TableKey,
+    GameState, Move, ScoreInfo, Table,
 };
 
 /// Handle to the search thread
@@ -145,7 +145,7 @@ impl Search {
                 let mut seen_positions = vec![];
                 loop {
                     gs = gs.make_move(mv).expect("PV move should be legal");
-                    let key = TableKey::new(&gs);
+                    let key = gs.key().into();
                     if seen_positions.contains(&key) {
                         break; // PV forms a loop
                     }
@@ -219,7 +219,7 @@ fn eval_minmax_pv_split(
     };
 
     // Lookup in the table
-    let table_key = TableKey::new(gs);
+    let table_key = gs.key().into();
     let table_move = match tt.lookup(&table_key) {
         Some(e) if e.depth == depth => {
             stat.table_hits += 1;
@@ -329,7 +329,7 @@ fn eval_minmax(
     }
 
     // Lookup in the table
-    let table_key = TableKey::new(gs);
+    let table_key = gs.key().into();
     let table_move = match tt.lookup(&table_key) {
         Some(e) if e.depth == depth => {
             stat.table_hits += 1;
@@ -403,7 +403,7 @@ fn eval_quiescent(
 
     // Pop and explore the branches, starting from the most promising
     while let Some(mv) = take_highest_move(&mut moves) {
-        let Ok(next_gs) = gs.make_move(mv) else {
+        let Ok(next_gs) = gs.make_move_quiescent(mv) else {
             continue; // Illegal move
         };
         let branch_score = -eval_quiescent(&next_gs, -beta, -alpha, stop, stats)?;

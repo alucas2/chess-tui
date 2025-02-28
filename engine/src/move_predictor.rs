@@ -1,4 +1,4 @@
-use crate::{evaluate, GameState, Move, MoveInfo, PlayerSide};
+use crate::{evaluate, GameState, Move, MoveFlag, MoveInfo, PieceKind, PlayerSide, SquareIndex};
 
 const NUM_KILLER_MOVES: usize = 3;
 
@@ -16,11 +16,34 @@ pub struct MovePredictor {
 /// NOTE: The "score" returned by this function has nothing to do with
 /// the "score" of a gamestate, the latter being represented by the `Score` type.
 pub fn eval(gs: &GameState, mv: Move) -> i16 {
-    let mv = mv.unwrap();
+    let mvi = mv.unwrap();
     const CAPTURE_MULT: i16 = 20;
-    if let Some((_, victim)) = gs.pieces.get(mv.to) {
-        // Bonus for capturing an enemy with a cheap friend
-        CAPTURE_MULT * evaluate::piece_value(victim) - evaluate::piece_value(mv.kind)
+    match gs.pieces.get(mvi.to) {
+        Some((_, victim)) if !matches!(mvi.flag, MoveFlag::CastleEast | MoveFlag::CastleWest) => {
+            // Static exchange evaluation for captures
+            // Ranges from approx. -18000 to +18000
+            let next_gs = gs.make_move_exchange_eval(mv);
+            CAPTURE_MULT
+                * (evaluate::piece_value(victim)
+                    - static_exchange_eval(&next_gs, mvi.to.mirror(), mvi.kind))
+        }
+        _ => 0,
+    }
+}
+
+/// Compute the material gain that happen if the specified piece at the specified square
+/// gets captured, and its capturor is captured again, and so on...
+fn static_exchange_eval(gs: &GameState, sq: SquareIndex, victim: PieceKind) -> i16 {
+    if let Some(mv) = gs.cheapest_attacker(sq) {
+        let next_gs = gs.make_move_exchange_eval(mv);
+        let mv = mv.unwrap();
+        let capturor = match mv.flag {
+            MoveFlag::Promotion(prom) => prom,
+            _ => mv.kind,
+        };
+        let mut score = evaluate::piece_value(victim);
+        score -= static_exchange_eval(&next_gs, sq.mirror(), capturor);
+        score.max(0)
     } else {
         0
     }
@@ -37,28 +60,41 @@ impl MovePredictor {
 
     /// Make a fast evaluation of a move, with a stateful evaluator for better accuracy.
     pub fn eval(&self, gs: &GameState, mv: Move, depth: u16) -> i16 {
-        let mv = mv.unwrap();
+        let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
-        if let Some((_, victim)) = gs.pieces.get(mv.to) {
-            // Bonus for capturing an enemy with a cheap friend
-            // Ranges from approx 1000 to 17900
-            CAPTURE_MULT * evaluate::piece_value(victim) - evaluate::piece_value(mv.kind)
-        } else {
-            if let Some(i) = self.killer_moves[depth as usize]
-                .iter()
-                .position(|k| *k == Some(mv))
+        match gs.pieces.get(mvi.to) {
+            Some((_, victim))
+                if !matches!(mvi.flag, MoveFlag::CastleEast | MoveFlag::CastleWest) =>
             {
-                // Bonus for killer moves
-                // Ranges from approx 500 to 512
-                KILLER_BONUS - i as i16
-            } else {
-                // Bonus from history
-                // Ranges from 0 to 255
-                (match gs.side_to_move {
-                    PlayerSide::White => self.history_white[mv.kind as usize][mv.to as usize],
-                    PlayerSide::Black => self.history_black[mv.kind as usize][mv.to as usize],
-                }) as i16
+                // Static exchange evaluation for captures
+                // Ranges from approx. -18000 to +18000
+                let next_gs = gs.make_move_exchange_eval(mv);
+                let capture_gain = evaluate::piece_value(victim)
+                    - static_exchange_eval(&next_gs, mvi.to.mirror(), mvi.kind);
+                match capture_gain {
+                    // Place winning and neutral captures above killer moves
+                    0.. => CAPTURE_MULT * capture_gain + KILLER_BONUS + 1,
+                    // Place loosing captures after everything
+                    ..=-1 => CAPTURE_MULT * capture_gain,
+                }
+            }
+            _ => {
+                if let Some(i) = self.killer_moves[depth as usize]
+                    .iter()
+                    .position(|k| *k == Some(mvi))
+                {
+                    // Bonus for killer moves
+                    // Ranges from approx 500 to 512
+                    KILLER_BONUS - i as i16
+                } else {
+                    // Bonus from history
+                    // Ranges from 0 to 255
+                    (match gs.side_to_move {
+                        PlayerSide::White => self.history_white[mvi.kind as usize][mvi.to as usize],
+                        PlayerSide::Black => self.history_black[mvi.kind as usize][mvi.to as usize],
+                    }) as i16
+                }
             }
         }
     }

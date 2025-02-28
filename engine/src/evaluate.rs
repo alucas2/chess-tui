@@ -90,23 +90,30 @@ pub fn eval(gs: &GameState) -> Score {
     // Blend the midgame and engame material values
     // 10000 is considered the beginning of the game, 6000 the end of the game
     let material_diff_blend = {
-        let midgame_factor = ((total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
-        let material_diff_midgame = material_diff_midgame as f32 * midgame_factor;
-        let material_diff_endgame = material_diff_endgame as f32 * (1.0 - midgame_factor);
-        (material_diff_midgame + material_diff_endgame).round() as i16
+        // let midgame_factor = ((total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
+        // let material_diff_midgame = material_diff_midgame as f32 * midgame_factor;
+        // let material_diff_endgame = material_diff_endgame as f32 * (1.0 - midgame_factor);
+        // (material_diff_midgame + material_diff_endgame).round() as i16
+        let midgame_factor = (total_material - 6000).max(0).saturating_mul(8);
+        let endgame_factor = i16::MAX - midgame_factor;
+        let material_diff_midgame = (material_diff_midgame as i32 * midgame_factor as i32) >> 16;
+        let material_diff_endgame = (material_diff_endgame as i32 * endgame_factor as i32) >> 16;
+        (material_diff_midgame + material_diff_endgame) as i16
     };
     Score(material_diff_blend + bonus)
 }
 
+/// Compute a bonus score for based on how many squares are reachable by a piece
 fn mobility_bonus(kind: PieceKind, sq: SquareIndex, blockers: u64) -> i16 {
     match kind {
         PieceKind::Pawn => 0,
         PieceKind::Knight => 0,
-        PieceKind::Bishop => lut::bishop_reachable(sq, blockers).count_ones() as i16,
-        PieceKind::Rook => lut::rook_reachable(sq, blockers).count_ones() as i16,
-        PieceKind::Queen => (lut::bishop_reachable(sq, blockers)
-            | lut::rook_reachable(sq, blockers))
-        .count_ones() as i16,
+        PieceKind::Bishop => 4 * lut::bishop_reachable(sq, blockers).count_ones() as i16,
+        PieceKind::Rook => 4 * lut::rook_reachable(sq, blockers).count_ones() as i16,
+        PieceKind::Queen => {
+            2 * (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+                .count_ones() as i16
+        }
         PieceKind::King => 0,
     }
 }

@@ -25,6 +25,16 @@ pub struct GameState {
     pub(crate) fullmoves: u16,
 }
 
+/// Minimal amount of data that can uniqely identify a GameState.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GameStateKey {
+    pieces: CompactPieceArray,
+    side_to_move: PlayerSide,
+    friends_castle: CastleRights,
+    enemies_castle: CastleRights,
+    en_passant: Option<FileIndex>,
+}
+
 /// Array of 6 bitboards, one for each piece kind
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PieceBitboards([u64; 6]);
@@ -39,6 +49,16 @@ pub(crate) struct CompactPieceArray([u64; 4]);
 pub struct CastleRights(u8);
 
 impl GameState {
+    pub fn key(&self) -> GameStateKey {
+        GameStateKey {
+            pieces: self.pieces,
+            side_to_move: self.side_to_move,
+            friends_castle: self.friends_castle,
+            enemies_castle: self.enemies_castle,
+            en_passant: self.en_passant,
+        }
+    }
+
     pub fn piece(&self, square: SquareIndex) -> Option<(PlayerSide, PieceKind)> {
         let square = match self.side_to_move {
             PlayerSide::White => square,
@@ -173,15 +193,7 @@ impl CompactPieceArray {
         // b2-b0 represent the kind of piece, or the absence of piece
         let i = sq as usize;
         let nibble = self.0[i / 16] >> (i % 16 * 4);
-        let kind = match nibble & 0b0111 {
-            0 => PieceKind::Pawn,
-            1 => PieceKind::Knight,
-            2 => PieceKind::Bishop,
-            3 => PieceKind::Rook,
-            4 => PieceKind::Queen,
-            5 => PieceKind::King,
-            _ => return None,
-        };
+        let kind = PieceKind::from_index(nibble as u8 & 0b0111)?;
         let side = if nibble & 0b1000 == 0 {
             PlayerSide::White
         } else {

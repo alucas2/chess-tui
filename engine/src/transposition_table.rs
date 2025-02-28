@@ -2,11 +2,7 @@ use rustc_hash::FxHasher;
 
 use std::hash::{Hash, Hasher};
 
-use crate::{
-    atomic_cell::AtomicCell,
-    game_state::{CastleRights, CompactPieceArray, GameState},
-    FileIndex, PlayerSide,
-};
+use crate::{atomic_cell::AtomicCell, game_state::GameStateKey};
 
 /// Size of a table entry is:
 /// `8 + 36 + size_of::<X> + size_of::<V>`
@@ -24,11 +20,7 @@ pub struct TableKey<X> {
 /// size is at least: 36 + sizeof::<X>
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct Tag<X> {
-    pieces: CompactPieceArray,
-    side_to_move: PlayerSide,
-    friends_castle: CastleRights,
-    enemies_castle: CastleRights,
-    en_passant: Option<FileIndex>,
+    gs: GameStateKey,
     extra: X,
 }
 
@@ -38,22 +30,15 @@ struct Entry<X, V> {
     value: V,
 }
 
-impl TableKey<()> {
-    pub fn new(gs: &GameState) -> TableKey<()> {
+impl From<GameStateKey> for TableKey<()> {
+    fn from(gs: GameStateKey) -> Self {
         TableKey::with_extra(gs, ())
     }
 }
 
 impl<X: Hash> TableKey<X> {
-    pub fn with_extra(gs: &GameState, extra: X) -> TableKey<X> {
-        let tag = Tag {
-            pieces: gs.pieces,
-            side_to_move: gs.side_to_move,
-            friends_castle: gs.friends_castle,
-            enemies_castle: gs.enemies_castle,
-            en_passant: gs.en_passant,
-            extra,
-        };
+    pub fn with_extra(gs: GameStateKey, extra: X) -> TableKey<X> {
+        let tag = Tag { gs, extra };
         let mut hash = FxHasher::default();
         tag.hash(&mut hash);
         let hash = hash.finish();

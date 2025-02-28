@@ -78,20 +78,154 @@ impl std::fmt::Display for MoveInfo {
 pub struct IllegalMoveError;
 
 impl GameState {
-    /// Collect all the pseudo-legal moves from a given state.
+    /// Collect all the pseudo-legal moves from the current
     pub fn pseudo_legal_moves<F: FnMut(Move)>(&self, f: F) {
-        gen_moves::<false, F>(self, f)
+        self.pseudo_legal_moves_inner::<false, F>(f)
     }
 
-    /// Collect the pseudo-legal moves from a given state, but only the captures.
-    pub fn pseudo_legal_captures<F: FnMut(Move)>(&self, f: F) {
-        gen_moves::<true, F>(self, f)
+    /// Collect the pseudo-legal moves from the current, but only the captures.
+    pub(crate) fn pseudo_legal_captures<F: FnMut(Move)>(&self, f: F) {
+        self.pseudo_legal_moves_inner::<true, F>(f)
+    }
+
+    /// Call the provided closure on all pseudo-legal moves from the current state
+    fn pseudo_legal_moves_inner<const JUST_CAPTURES: bool, F: FnMut(Move)>(&self, mut f: F) {
+        let friends_bb_union = self.friends_bb.union();
+        let enemies_bb_union = self.enemies_bb.union();
+        let blockers = friends_bb_union | enemies_bb_union;
+
+        let dst_mask = if JUST_CAPTURES {
+            enemies_bb_union
+        } else {
+            !friends_bb_union
+        };
+
+        // Pawn regular moves
+        for from in SquareIter(self.friends_bb[Pawn] & !RankIndex::_7.bb().get()) {
+            let from_bb = from.bb().get();
+            let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
+            if JUST_CAPTURES {
+                for to in SquareIter(captures) {
+                    f(Move::normal(Pawn, from, to))
+                }
+            } else {
+                let single_push = lut::shift_n(from_bb) & !blockers;
+                for to in SquareIter(captures | single_push) {
+                    f(Move::normal(Pawn, from, to))
+                }
+                for to in
+                    SquareIter(lut::shift_n(single_push) & !blockers & RankIndex::_4.bb().get())
+                {
+                    f(Move::with_flag(Pawn, from, to, MoveFlag::DoublePush))
+                }
+            }
+        }
+
+        // Pawn promotions
+        for from in SquareIter(self.friends_bb[Pawn] & RankIndex::_7.bb().get()) {
+            const PROMOTIONS: [PieceKind; 4] = [Queen, Knight, Bishop, Rook];
+            let from_bb = from.bb().get();
+            let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
+            if JUST_CAPTURES {
+                for to in SquareIter(captures) {
+                    for prom in PROMOTIONS {
+                        f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
+                    }
+                }
+            } else {
+                let single_push = lut::shift_n(from_bb) & !blockers;
+                for to in SquareIter(captures | single_push) {
+                    for prom in PROMOTIONS {
+                        f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
+                    }
+                }
+            }
+        }
+
+        // Knight, Bishop, Rook, Queen and King moves
+        for from in SquareIter(self.friends_bb[Knight]) {
+            for to in SquareIter(lut::knight_reachable(from) & dst_mask) {
+                f(Move::normal(Knight, from, to))
+            }
+        }
+        for from in SquareIter(self.friends_bb[Bishop]) {
+            for to in SquareIter(lut::bishop_reachable(from, blockers) & dst_mask) {
+                f(Move::normal(Bishop, from, to))
+            }
+        }
+        for from in SquareIter(self.friends_bb[Rook]) {
+            for to in SquareIter(lut::rook_reachable(from, blockers) & dst_mask) {
+                f(Move::normal(Rook, from, to))
+            }
+        }
+        for from in SquareIter(self.friends_bb[Queen]) {
+            for to in SquareIter(
+                (lut::bishop_reachable(from, blockers) | lut::rook_reachable(from, blockers))
+                    & dst_mask,
+            ) {
+                f(Move::normal(Queen, from, to))
+            }
+        }
+        for from in SquareIter(self.friends_bb[King]) {
+            for to in SquareIter(lut::king_reachable(from) & dst_mask) {
+                f(Move::normal(King, from, to))
+            }
+        }
+
+        // En passant
+        if let Some(file) = self.en_passant {
+            let to = SquareIndex::from_coords(file, RankIndex::_6);
+            let to_bb = to.bb().get();
+            let capturers = (lut::shift_se(to_bb) | lut::shift_sw(to_bb)) & self.friends_bb[Pawn];
+            for from in SquareIter(capturers) {
+                f(Move::with_flag(Pawn, from, to, MoveFlag::EnPassant))
+            }
+        }
+
+        // Castle
+        if !JUST_CAPTURES {
+            for castle_side in [CastleSide::East, CastleSide::West] {
+                if let Some(file) = self.friends_castle.get(castle_side) {
+                    if let Some(king_from) = SquareIter(self.friends_bb[King]).next() {
+                        let rook_from = SquareIndex::from_coords(file, RankIndex::_1);
+                        let (king_to, rook_to) = castle_destinations(castle_side);
+                        let blockers = blockers & !king_from.bb().get() & !rook_from.bb().get();
+                        if lut::castle_ray(king_from, king_to) & blockers == 0
+                            && lut::castle_ray(rook_from, rook_to) & blockers == 0
+                        {
+                            f(Move::castle(castle_side, king_from, rook_from))
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Perform a move, then flip the position of enemies and friends.
     /// This function must be called with a move that has been generated from this state!
     /// If not, then probably no error will be raised but the returned state will be corrupted.
-    pub fn make_move(mut self, mv: Move) -> Result<GameState, IllegalMoveError> {
+    pub fn make_move(self, mv: Move) -> Result<GameState, IllegalMoveError> {
+        self.make_move_inner::<true, true>(mv)
+    }
+
+    /// Perform a move, accelerated for quiescent search
+    pub(crate) fn make_move_quiescent(self, mv: Move) -> Result<GameState, IllegalMoveError> {
+        self.make_move_inner::<false, true>(mv)
+    }
+
+    /// Perform a move, accelerated for static exchange evaluation
+    pub(crate) fn make_move_exchange_eval(self, mv: Move) -> GameState {
+        self.make_move_inner::<false, false>(mv).unwrap()
+    }
+
+    /// Perform a move.
+    ///
+    /// When the UPDATE_STATE flag is not set, this function will take some computational shortcuts,
+    /// for instance by not updating the castling rights flags.
+    fn make_move_inner<const UPDATE_STATE: bool, const CHECK_LEGAL: bool>(
+        mut self,
+        mv: Move,
+    ) -> Result<GameState, IllegalMoveError> {
         let Move(mv) = mv;
         let victim = self.pieces.get(mv.to);
 
@@ -147,181 +281,118 @@ impl GameState {
             }
         }
 
-        // Check that the move does not put the king in danger
+        if CHECK_LEGAL {
+            // Check that the move does not put the king in danger
+            let blockers = self.friends_bb.union() | self.enemies_bb.union();
+            for sq in SquareIter(self.friends_bb[King]) {
+                if is_dangerous(sq, self.enemies_bb, blockers) {
+                    return Err(IllegalMoveError);
+                }
+            }
+        }
+
+        if UPDATE_STATE {
+            // Revoke own castle rights
+            if mv.kind == King {
+                self.friends_castle.set(CastleSide::East, None);
+                self.friends_castle.set(CastleSide::West, None);
+            } else if mv.kind == Rook {
+                let (file, rank) = mv.from.coords();
+                if rank == RankIndex::_1 {
+                    for castle_side in [CastleSide::East, CastleSide::West] {
+                        if Some(file) == self.friends_castle.get(castle_side) {
+                            self.friends_castle.set(castle_side, None)
+                        }
+                    }
+                }
+            }
+
+            // Revoke enemy's castle rights
+            if let Some((_, Rook)) = victim {
+                let (file, rank) = mv.to.coords();
+                if rank == RankIndex::_8 {
+                    for castle_side in [CastleSide::East, CastleSide::West] {
+                        if Some(file) == self.enemies_castle.get(castle_side) {
+                            self.enemies_castle.set(castle_side, None);
+                        }
+                    }
+                }
+            }
+
+            // Flip sides
+            Ok(GameState {
+                pieces: self.pieces.mirror(),
+                friends_bb: self.enemies_bb.mirror(),
+                enemies_bb: self.friends_bb.mirror(),
+                side_to_move: self.side_to_move.opposite(),
+                friends_castle: self.enemies_castle,
+                enemies_castle: self.friends_castle,
+                en_passant: new_en_passant_target,
+                fullmoves: match self.side_to_move {
+                    PlayerSide::White => self.fullmoves,
+                    PlayerSide::Black => self.fullmoves + 1,
+                },
+            })
+        } else {
+            // Flip sides
+            Ok(GameState {
+                pieces: self.pieces.mirror(),
+                friends_bb: self.enemies_bb.mirror(),
+                enemies_bb: self.friends_bb.mirror(),
+                side_to_move: self.side_to_move.opposite(),
+                en_passant: None,
+                ..self
+            })
+        }
+    }
+
+    /// Find the cheapest friendly piece in the from_mask that can attack the given square
+    pub(crate) fn cheapest_attacker(&self, sq: SquareIndex) -> Option<Move> {
+        // Pawn regular move
+        let sq_bb = sq.bb().get();
+        let attackers = (lut::shift_se(sq_bb) | lut::shift_sw(sq_bb))
+            & self.friends_bb[Pawn]
+            & !RankIndex::_7.bb().get();
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::normal(Pawn, from, sq));
+        }
+        // Knight, Bishop, Rook or Queen move, in that order
         let blockers = self.friends_bb.union() | self.enemies_bb.union();
-        for sq in SquareIter(self.friends_bb[King]) {
-            if is_dangerous(sq, self.enemies_bb, blockers) {
-                return Err(IllegalMoveError);
-            }
+        let attackers = lut::knight_reachable(sq) & self.friends_bb[Knight];
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::normal(Knight, from, sq));
         }
-
-        // Revoke own castle rights
-        if mv.kind == King {
-            self.friends_castle.set(CastleSide::East, None);
-            self.friends_castle.set(CastleSide::West, None);
-        } else if mv.kind == Rook {
-            let (file, rank) = mv.from.coords();
-            if rank == RankIndex::_1 {
-                for castle_side in [CastleSide::East, CastleSide::West] {
-                    if Some(file) == self.friends_castle.get(castle_side) {
-                        self.friends_castle.set(castle_side, None)
-                    }
-                }
-            }
+        let attackers = lut::bishop_reachable(sq, blockers) & self.friends_bb[Bishop];
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::normal(Bishop, from, sq));
         }
-
-        // Revoke enemy's castle rights
-        if let Some((_, Rook)) = victim {
-            let (file, rank) = mv.to.coords();
-            if rank == RankIndex::_8 {
-                for castle_side in [CastleSide::East, CastleSide::West] {
-                    if Some(file) == self.enemies_castle.get(castle_side) {
-                        self.enemies_castle.set(castle_side, None);
-                    }
-                }
-            }
+        let attackers = lut::rook_reachable(sq, blockers) & self.friends_bb[Rook];
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::normal(Rook, from, sq));
         }
-
-        // Flip sides
-        Ok(GameState {
-            pieces: self.pieces.mirror(),
-            friends_bb: self.enemies_bb.mirror(),
-            enemies_bb: self.friends_bb.mirror(),
-            side_to_move: self.side_to_move.opposite(),
-            friends_castle: self.enemies_castle,
-            enemies_castle: self.friends_castle,
-            en_passant: new_en_passant_target,
-            fullmoves: match self.side_to_move {
-                PlayerSide::White => self.fullmoves,
-                PlayerSide::Black => self.fullmoves + 1,
-            },
-        })
+        let attackers = (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+            & self.friends_bb[Queen];
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::normal(Queen, from, sq));
+        }
+        // Pawn promotion
+        let attackers = (lut::shift_se(sq_bb) | lut::shift_sw(sq_bb))
+            & self.friends_bb[Pawn]
+            & RankIndex::_7.bb().get();
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::with_flag(Pawn, from, sq, MoveFlag::Promotion(Queen)));
+        }
+        // King move
+        let attackers = lut::king_reachable(sq) & self.friends_bb[King];
+        if let Some(from) = SquareIter(attackers).next() {
+            return Some(Move::normal(King, from, sq));
+        }
+        None
     }
 
     pub fn is_check(&self) -> bool {
         let blockers = self.friends_bb.union() | self.enemies_bb.union();
         SquareIter(self.friends_bb[King]).any(|sq| is_dangerous(sq, self.enemies_bb, blockers))
-    }
-}
-
-/// Push pseudo-legal moves into a Vec.
-///
-/// We use a const parameter here to force the existence of two monomorphized versions of this function.
-fn gen_moves<const JUST_CAPTURES: bool, F: FnMut(Move)>(gs: &GameState, mut f: F) {
-    let friends_bb_union = gs.friends_bb.union();
-    let enemies_bb_union = gs.enemies_bb.union();
-    let blockers = friends_bb_union | enemies_bb_union;
-
-    let dst_mask = if JUST_CAPTURES {
-        enemies_bb_union
-    } else {
-        !friends_bb_union
-    };
-
-    // Pawn regular moves
-    for from in SquareIter(gs.friends_bb[Pawn] & !RankIndex::_7.bb().get()) {
-        let from_bb = from.bb().get();
-        let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
-        if JUST_CAPTURES {
-            for to in SquareIter(captures) {
-                f(Move::normal(Pawn, from, to))
-            }
-        } else {
-            let single_push = lut::shift_n(from_bb) & !blockers;
-            for to in SquareIter(captures | single_push) {
-                f(Move::normal(Pawn, from, to))
-            }
-            for to in SquareIter(lut::shift_n(single_push) & !blockers & RankIndex::_4.bb().get()) {
-                f(Move::with_flag(Pawn, from, to, MoveFlag::DoublePush))
-            }
-        }
-    }
-
-    // Pawn promotions
-    for from in SquareIter(gs.friends_bb[Pawn] & RankIndex::_7.bb().get()) {
-        const PROMOTIONS: [PieceKind; 4] = [Queen, Knight, Bishop, Rook];
-        let from_bb = from.bb().get();
-        let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
-        if JUST_CAPTURES {
-            for to in SquareIter(captures) {
-                for prom in PROMOTIONS {
-                    f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
-                }
-            }
-        } else {
-            let single_push = lut::shift_n(from_bb) & !blockers;
-            for to in SquareIter(captures | single_push) {
-                for prom in PROMOTIONS {
-                    f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
-                }
-            }
-        }
-    }
-
-    // Knight moves
-    for from in SquareIter(gs.friends_bb[Knight]) {
-        for to in SquareIter(lut::knight_reachable(from) & dst_mask) {
-            f(Move::normal(Knight, from, to))
-        }
-    }
-
-    // Bishop moves
-    for from in SquareIter(gs.friends_bb[Bishop]) {
-        for to in SquareIter(lut::bishop_reachable(from, blockers) & dst_mask) {
-            f(Move::normal(Bishop, from, to))
-        }
-    }
-
-    // Rook moves
-    for from in SquareIter(gs.friends_bb[Rook]) {
-        for to in SquareIter(lut::rook_reachable(from, blockers) & dst_mask) {
-            f(Move::normal(Rook, from, to))
-        }
-    }
-
-    // Queen moves
-    for from in SquareIter(gs.friends_bb[Queen]) {
-        for to in SquareIter(
-            (lut::bishop_reachable(from, blockers) | lut::rook_reachable(from, blockers))
-                & dst_mask,
-        ) {
-            f(Move::normal(Queen, from, to))
-        }
-    }
-
-    // King moves
-    for from in SquareIter(gs.friends_bb[King]) {
-        for to in SquareIter(lut::king_reachable(from) & dst_mask) {
-            f(Move::normal(King, from, to))
-        }
-    }
-
-    // En passant
-    if let Some(file) = gs.en_passant {
-        let to = SquareIndex::from_coords(file, RankIndex::_6);
-        let to_bb = to.bb().get();
-        let capturers = (lut::shift_se(to_bb) | lut::shift_sw(to_bb)) & gs.friends_bb[Pawn];
-        for from in SquareIter(capturers) {
-            f(Move::with_flag(Pawn, from, to, MoveFlag::EnPassant))
-        }
-    }
-
-    // Castle
-    if !JUST_CAPTURES {
-        for castle_side in [CastleSide::East, CastleSide::West] {
-            if let Some(file) = gs.friends_castle.get(castle_side) {
-                if let Some(king_from) = SquareIter(gs.friends_bb[King]).next() {
-                    let rook_from = SquareIndex::from_coords(file, RankIndex::_1);
-                    let (king_to, rook_to) = castle_destinations(castle_side);
-                    let blockers = blockers & !king_from.bb().get() & !rook_from.bb().get();
-                    if lut::castle_ray(king_from, king_to) & blockers == 0
-                        && lut::castle_ray(rook_from, rook_to) & blockers == 0
-                    {
-                        f(Move::castle(castle_side, king_from, rook_from))
-                    }
-                }
-            }
-        }
     }
 }
 
