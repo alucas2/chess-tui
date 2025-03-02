@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::{
     evaluate::{self, AtomicScore, Score},
     move_predictor::{self, MovePredictor},
-    GameState, Move, ScoreInfo, Table,
+    GameState, Move, ScoreInfo, Table, TableKey,
 };
 
 /// Handle to the search thread
@@ -64,13 +64,41 @@ struct SearchResult {
     best: Option<Move>,
 }
 
+struct SearchContext<'a> {
+    stop: &'a AtomicBool,
+    table: &'a Table<(), TableValue>,
+    move_predictor: MovePredictor,
+    statistics: SearchStatistics,
+}
+
 /// Values that are stored in the table.
 /// Its size should not be excessive to fit within a table entry
 #[derive(Clone, Copy)]
 struct TableValue {
     depth: u16,
     score: Score,
+    score_kind: ScoreKind,
     best: Option<Move>,
+}
+
+#[derive(Clone, Copy)]
+enum ScoreKind {
+    Exact,
+    AtLeast,
+    AtMost,
+}
+
+struct SearchInterrupted;
+
+/// Stores a move and a rough evaluation of the move to compare it to other moves
+struct MoveWithKey {
+    mv: Move,
+    key: i16,
+}
+
+enum LookupResult {
+    UpdateBounds { alpha: Score, beta: Score },
+    Cutoff { score: Score },
 }
 
 const TABLE_NUM_ENTRIES: usize = 2_usize.pow(23);
@@ -98,16 +126,21 @@ impl Search {
             thread::spawn(move || {
                 // Iterative deepening
                 for depth in 1..=20 {
-                    let mut new_stats = SearchStatistics::default();
+                    let mut ctx = SearchContext {
+                        stop: &stop,
+                        table: &TABLE,
+                        move_predictor: MovePredictor::new(depth),
+                        statistics: SearchStatistics::default(),
+                    };
                     let final_score = eval_minmax_pv_split(
                         &gs,
+                        Score::MIN,
+                        Score::MAX,
                         depth,
-                        &stop,
-                        &TABLE,
-                        &mut new_stats,
+                        &mut ctx,
                         Some(&result),
                     );
-                    stats.write().unwrap().add(&new_stats);
+                    stats.write().unwrap().add(&ctx.statistics);
                     let Ok(final_score) = final_score else {
                         break; // Search has been interrupted
                     };
@@ -182,26 +215,76 @@ impl Drop for Search {
     }
 }
 
-struct SearchInterrupted;
-
-/// Stores a move and a rough evaluation of the move to compare it to other moves
-struct MoveWithKey {
-    mv: Move,
-    key: i16,
+/// Lookup a position in the table and take the opportunity to restrict the alpha and beta bounds.
+/// Returns (alpha, beta, best_move).
+fn lookup_table(
+    key: &TableKey<()>,
+    mut alpha: Score,
+    mut beta: Score,
+    desired_depth: u16,
+    ctx: &mut SearchContext,
+) -> (LookupResult, Option<Move>) {
+    let table_move = match ctx.table.lookup(key) {
+        Some(e) => {
+            ctx.statistics.table_hits += 1;
+            if e.depth == desired_depth {
+                match e.score_kind {
+                    ScoreKind::Exact => return (LookupResult::Cutoff { score: e.score }, e.best),
+                    ScoreKind::AtLeast => alpha = alpha.max(e.score),
+                    ScoreKind::AtMost => beta = beta.min(e.score),
+                }
+                if alpha >= beta {
+                    return (LookupResult::Cutoff { score: e.score }, e.best);
+                }
+            }
+            e.best
+        }
+        None => None,
+    };
+    (LookupResult::UpdateBounds { alpha, beta }, table_move)
 }
 
+/// Update a position's entry in the table
+fn update_table(
+    key: TableKey<()>,
+    alpha: Score,
+    beta: Score,
+    depth: u16,
+    score: Score,
+    best: Option<Move>,
+    ctx: &mut SearchContext,
+) {
+    let score_kind = if score <= alpha {
+        ScoreKind::AtMost // Could not reach alpha, the exact score is unknown
+    } else if score >= beta {
+        ScoreKind::AtLeast // Cutoff occurred, the exact score is unknown
+    } else {
+        ScoreKind::Exact
+    };
+    let table_value = TableValue {
+        depth,
+        score,
+        score_kind,
+        best,
+    };
+    if ctx.table.update(key, table_value) {
+        ctx.statistics.table_rewrites += 1;
+    }
+}
+
+/// Evaluate a position with a parallel minmax using "principal variation split"
 fn eval_minmax_pv_split(
     gs: &GameState,
+    alpha: Score,
+    beta: Score,
     depth: u16,
-    stop: &AtomicBool,
-    tt: &Table<(), TableValue>,
-    mut stat: &mut SearchStatistics,
+    ctx: &mut SearchContext,
     argmax: Option<&RwLock<SearchResult>>,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
-        return Ok(eval_quiescent(gs, Score::MIN, Score::MAX, stop, stat)?);
+        return Ok(eval_quiescent(gs, Score::MIN, Score::MAX, ctx)?);
     }
-    if stop.load(Ordering::Relaxed) {
+    if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
 
@@ -220,41 +303,36 @@ fn eval_minmax_pv_split(
 
     // Lookup in the table
     let table_key = gs.key().into();
-    let table_move = match tt.lookup(&table_key) {
-        Some(e) if e.depth == depth => {
-            stat.table_hits += 1;
-            compare_update_argmax(e.score, e.best);
-            return Ok(e.score);
+    let (alpha, beta, table_move) = match lookup_table(&table_key, alpha, beta, depth, ctx) {
+        (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
+        (LookupResult::Cutoff { score }, best_move) => {
+            compare_update_argmax(score, best_move);
+            return Ok(score);
         }
-        Some(e) => e.best,
-        None => None,
     };
 
-    let mut alpha = Score::MIN;
-    let beta = Score::MAX;
     let mut score = Score::NEG_INF;
     let mut best = None;
-
-    stat.expanded_nodes += 1;
+    ctx.statistics.expanded_nodes += 1;
     let mut branches = Branches::new(table_move);
+
     // Search the first branch first, passing the parallel flag
     // This method is called PV-splitting
     while let Some(mv) = branches.next(|| generate_moves(gs)) {
         let Ok(next) = gs.make_move(mv) else {
             continue;
         };
-        let branch_score = -eval_minmax_pv_split(&next, depth - 1, stop, tt, stat, None)?;
+        let branch_score = -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, ctx, None)?;
         best = Some(mv);
-        compare_update_argmax(branch_score, best);
-        score = score.max(branch_score);
-        alpha = alpha.max(score);
+        score = branch_score;
+        compare_update_argmax(score, best);
         break; // First branch exploration complete
     }
 
     // Search the remaining branches in parallel
-    let shared_alpha = AtomicScore::new(alpha);
+    let shared_score = AtomicScore::new(score);
     let shared_score_best = Mutex::new((score, best));
-    let shared_stat = Mutex::new(stat);
+    let shared_stat = Mutex::new(&mut ctx.statistics);
     std::iter::from_fn(|| branches.next(|| generate_moves(gs)))
         .par_bridge()
         .try_for_each(|mv| {
@@ -262,24 +340,20 @@ fn eval_minmax_pv_split(
                 return Ok(()); // Illegal move
             };
 
-            // Read the shared alpha value that other threads might have updated
-            let alpha = shared_alpha.load();
-            if alpha >= beta {
+            // Read the shared score value that other threads might have updated
+            let score = shared_score.load();
+            if score >= beta {
                 return Ok(()); // Cutoff
             }
-            let mut stat = SearchStatistics::default();
-            let mut mp = MovePredictor::new(depth);
-            let branch_score = -eval_minmax(
-                &next,
-                -beta,
-                -alpha,
-                depth - 1,
-                stop,
-                tt,
-                &mut mp,
-                &mut stat,
-            )?;
-            shared_stat.lock().unwrap().add(&stat);
+            let mut ctx = SearchContext {
+                stop: ctx.stop,
+                table: ctx.table,
+                move_predictor: MovePredictor::new(depth),
+                statistics: SearchStatistics::default(),
+            };
+            let branch_score = -eval_minmax(&next, -beta, -alpha.max(score), depth - 1, &mut ctx)?;
+            shared_score.fetch_max(branch_score);
+            shared_stat.lock().unwrap().add(&ctx.statistics);
 
             // Lock score and best together to keep them in sync
             let mut score_best = shared_score_best.lock().unwrap();
@@ -288,92 +362,79 @@ fn eval_minmax_pv_split(
                 compare_update_argmax(branch_score, score_best.1);
             }
             score_best.0 = score_best.0.max(branch_score);
-            shared_alpha.fetch_max(score_best.0);
             Ok(())
         })?;
     (score, best) = shared_score_best.into_inner().unwrap();
-    stat = shared_stat.into_inner().unwrap();
 
     // NEG_INF means that this position is a dead end, so either checkmate or stalemate
     if score == Score::NEG_INF {
         if gs.is_check() {
-            score = Score::MIN
+            score = Score::MIN // Checkmate
         } else {
-            score = Score::ZERO
+            score = Score::ZERO // Stalemate
         }
     }
 
-    let table_value = TableValue { depth, score, best };
-    if tt.update(table_key, table_value) {
-        stat.table_rewrites += 1;
-    }
+    // Store the result in the table
+    update_table(table_key, alpha, beta, depth, score, best, ctx);
     Ok(score)
 }
 
 /// Evaluate a position with a minmax search
 fn eval_minmax(
     gs: &GameState,
-    mut alpha: Score,
+    alpha: Score,
     beta: Score,
     depth: u16,
-    stop: &AtomicBool,
-    tt: &Table<(), TableValue>,
-    mp: &mut MovePredictor,
-    stat: &mut SearchStatistics,
+    ctx: &mut SearchContext,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
-        return Ok(eval_quiescent(gs, alpha, beta, stop, stat)?);
+        return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
     }
-    if stop.load(Ordering::Relaxed) {
+    if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
 
     // Lookup in the table
     let table_key = gs.key().into();
-    let table_move = match tt.lookup(&table_key) {
-        Some(e) if e.depth == depth => {
-            stat.table_hits += 1;
-            return Ok(e.score);
-        }
-        Some(e) => e.best,
-        None => None,
+    let (alpha, beta, table_move) = match lookup_table(&table_key, alpha, beta, depth, ctx) {
+        (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
+        (LookupResult::Cutoff { score }, _) => return Ok(score),
     };
 
+    // Pop and explore the branches, starting from the most promising
     let mut score = Score::NEG_INF;
     let mut best = None;
-
-    // Pop and explore the branches, starting from the most promising
-    stat.expanded_nodes += 1;
+    ctx.statistics.expanded_nodes += 1;
     let mut branches = Branches::new(table_move);
-    while let Some(mv) = branches.next(|| generate_moves_with_predictor(gs, mp, depth)) {
+    while let Some(mv) =
+        branches.next(|| generate_moves_with_predictor(gs, &ctx.move_predictor, depth))
+    {
         let Ok(next) = gs.make_move(mv) else {
             continue;
         };
-        let branch_score = -eval_minmax(&next, -beta, -alpha, depth - 1, stop, tt, mp, stat)?;
+        let branch_score = -eval_minmax(&next, -beta, -alpha.max(score), depth - 1, ctx)?;
         if branch_score > score {
             best = Some(mv);
-        }
-        score = score.max(branch_score);
-        alpha = alpha.max(score);
-        if alpha >= beta {
-            mp.apply_cutoff_bonus(gs, mv, depth);
-            break;
+            score = branch_score;
+            if score >= beta {
+                ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth);
+                break; // Cutoff
+            }
         }
     }
 
     // NEG_INF means that this position is a dead end, so either checkmate or stalemate
     if score == Score::NEG_INF {
         if gs.is_check() {
-            score = Score::MIN
+            score = Score::MIN // Checkmake
         } else {
-            score = Score::ZERO
+            score = Score::ZERO // Stalemate
         }
     }
 
-    let table_value = TableValue { depth, score, best };
-    if tt.update(table_key, table_value) {
-        stat.table_rewrites += 1;
-    }
+    // Store the result in the table
+    update_table(table_key, alpha, beta, depth, score, best, ctx);
     Ok(score)
 }
 
@@ -382,10 +443,9 @@ fn eval_quiescent(
     gs: &GameState,
     mut alpha: Score,
     beta: Score,
-    stop: &AtomicBool,
-    stats: &mut SearchStatistics,
+    ctx: &mut SearchContext,
 ) -> Result<Score, SearchInterrupted> {
-    if stop.load(Ordering::Relaxed) {
+    if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
 
@@ -398,7 +458,7 @@ fn eval_quiescent(
     }
 
     // Generate the captures and assign them a score
-    stats.expanded_nodes_quiescent += 1;
+    ctx.statistics.expanded_nodes_quiescent += 1;
     let mut moves = generate_captures(gs);
 
     // Pop and explore the branches, starting from the most promising
@@ -406,11 +466,12 @@ fn eval_quiescent(
         let Ok(next_gs) = gs.make_move_quiescent(mv) else {
             continue; // Illegal move
         };
-        let branch_score = -eval_quiescent(&next_gs, -beta, -alpha, stop, stats)?;
-        score = score.max(branch_score);
-        alpha = alpha.max(score);
-        if alpha >= beta {
-            break;
+        let branch_score = -eval_quiescent(&next_gs, -beta, -alpha.max(score), ctx)?;
+        if branch_score > score {
+            score = branch_score;
+            if score >= beta {
+                break; // Cutoff
+            }
         }
     }
 
