@@ -111,9 +111,9 @@ mod unparse {
     }
 
     fn move_counters(gs: &GameState, result: &mut String) {
-        result.push('0');
+        result.push_str(&gs.fiftymove_count().to_string());
         result.push(' ');
-        result.push_str(&gs.fullmoves().to_string());
+        result.push_str(&gs.fullmoves_count().to_string());
     }
 }
 
@@ -137,10 +137,10 @@ mod parse {
             en_passant_target(s, &mut gs)?;
         }
         if let Some(s) = split.next() {
-            let _: u16 = s.parse().map_err(|_| ParseError)?;
+            gs.set_fiftymove_count(s.parse().map_err(|_| ParseError)?);
         }
         if let Some(s) = split.next() {
-            gs.set_fullmoves(s.parse().map_err(|_| ParseError)?);
+            gs.set_fullmoves_count(s.parse().map_err(|_| ParseError)?);
         }
         Ok(gs)
     }

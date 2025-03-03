@@ -328,9 +328,14 @@ impl GameState {
                 friends_castle: self.enemies_castle,
                 enemies_castle: self.friends_castle,
                 en_passant: new_en_passant_target,
-                fullmoves: match self.side_to_move {
-                    PlayerSide::White => self.fullmoves,
-                    PlayerSide::Black => self.fullmoves + 1,
+                fullmoves_count: match self.side_to_move {
+                    PlayerSide::White => self.fullmoves_count,
+                    PlayerSide::Black => self.fullmoves_count + 1,
+                },
+                fiftymove_count: if mv.kind == Pawn || victim.is_some() {
+                    0
+                } else {
+                    self.fiftymove_count + 1
                 },
             })
         } else {

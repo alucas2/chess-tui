@@ -22,7 +22,9 @@ pub struct GameState {
     /// File of the potential en passant capture
     pub(crate) en_passant: Option<FileIndex>,
     /// Number of full moves, incremented after black has played
-    pub(crate) fullmoves: u16,
+    pub(crate) fullmoves_count: u16,
+    // Number of moves since the last capture or pawn push
+    pub(crate) fiftymove_count: u16,
 }
 
 /// Minimal amount of data that can uniqely identify a GameState.
@@ -94,7 +96,8 @@ impl GameState {
                 friends_castle: self.enemies_castle,
                 enemies_castle: self.friends_castle,
                 en_passant: self.en_passant,
-                fullmoves: self.fullmoves,
+                fullmoves_count: self.fullmoves_count,
+                fiftymove_count: self.fiftymove_count,
             }
         }
     }
@@ -123,12 +126,20 @@ impl GameState {
         self.en_passant = value
     }
 
-    pub fn fullmoves(&self) -> u16 {
-        self.fullmoves
+    pub fn fullmoves_count(&self) -> u16 {
+        self.fullmoves_count
     }
 
-    pub fn set_fullmoves(&mut self, value: u16) {
-        self.fullmoves = value;
+    pub fn set_fullmoves_count(&mut self, value: u16) {
+        self.fullmoves_count = value;
+    }
+
+    pub fn fiftymove_count(&self) -> u16 {
+        self.fiftymove_count
+    }
+
+    pub fn set_fiftymove_count(&mut self, value: u16) {
+        self.fiftymove_count = value
     }
 
     /// Remove a piece from the board while keeping the internal data consistent.

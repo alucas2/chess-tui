@@ -69,7 +69,7 @@ pub fn moves_with_notation(gs: &GameState) -> Vec<MoveWithNotation> {
                 };
                 MoveWithNotation {
                     inner: mv,
-                    number: gs.fullmoves(),
+                    number: gs.fullmoves_count(),
                     player: gs.side_to_move(),
                     who: mv_info.kind,
                     start: mv_info.from,
