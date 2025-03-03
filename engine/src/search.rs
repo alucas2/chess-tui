@@ -144,9 +144,11 @@ impl Search {
                     let Ok(final_score) = final_score else {
                         break; // Search has been interrupted
                     };
-                    if final_score == Score::MIN || final_score == Score::MAX {
-                        result.write().unwrap().score = final_score;
+                    if final_score == Score::MAX || final_score == Score::MIN {
                         break; // Stop deepening when a checkmate is found
+                    }
+                    if depth == 1 && result.read().unwrap().best.is_none() {
+                        break; // Current position is a checkmate or stalemate
                     }
                 }
                 // Signal the end of the search
@@ -288,6 +290,8 @@ fn eval_minmax_pv_split(
         return Err(SearchInterrupted);
     }
 
+    // Call this closure to report a potential score and best move.
+    // This is only needed for the root node.
     let compare_update_argmax = |new_score, new_best| {
         if let Some(argmax) = argmax {
             let mut argmax = argmax.write().unwrap();
@@ -373,6 +377,7 @@ fn eval_minmax_pv_split(
         } else {
             score = Score::ZERO // Stalemate
         }
+        compare_update_argmax(score, None);
     }
 
     // Store the result in the table
