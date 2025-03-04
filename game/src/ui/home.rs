@@ -309,7 +309,15 @@ impl IState for Home {
                         self.do_move(*mv);
                     }
                 }
-                None => self.pending_search = Some(Search::start(*self.gamestate.current())),
+                None => {
+                    self.pending_search = Some(
+                        Search::start(
+                            *self.gamestate.initial(),
+                            self.gamestate.moves_before().iter().map(|mv| mv.inner),
+                        )
+                        .expect("All moves before should be legal"),
+                    )
+                }
             },
             Some(KeyCode::Backspace) => self.pending_move_start = None,
             Some(KeyCode::Enter) => {

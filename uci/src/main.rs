@@ -9,8 +9,15 @@ use std::{
 use uci_parser::UciCommand;
 
 fn main() -> anyhow::Result<()> {
-    let mut gs = GameState::default();
+    // Retained state for the next "go" command
+    let mut initial = GameState::default();
+    let mut moves_from_initial = vec![];
+    let mut current = GameState::default();
+
+    // Perpetually running search thread
     let search = SearchThread::new();
+
+    // Event loop
     loop {
         match recv_command()? {
             UciCommand::Uci => {
@@ -30,24 +37,31 @@ fn main() -> anyhow::Result<()> {
             UciCommand::Register { .. } => {}
             UciCommand::UciNewGame => {}
             UciCommand::Position { fen, moves } => {
-                gs = fen
+                initial = fen
                     .as_deref()
                     .unwrap_or("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
                     .parse()?;
+                moves_from_initial.clear();
+                current = initial;
                 for mv in moves {
-                    match make_move_with_notation(&gs, &mv) {
-                        Some(next_gs) => gs = next_gs,
+                    match make_move_with_notation(&current, &mv) {
+                        Some((mv, next_gs)) => {
+                            current = next_gs;
+                            moves_from_initial.push(mv);
+                        }
                         None => bail!("Cannot make the move {mv}"),
                     }
                 }
             }
             UciCommand::Go(options) => {
-                let (time_left, time_increment) = match gs.side_to_move() {
+                let (time_left, time_increment) = match current.side_to_move() {
                     PlayerSide::White => (options.wtime, options.winc),
                     PlayerSide::Black => (options.btime, options.binc),
                 };
                 search.start(
-                    gs,
+                    initial,
+                    moves_from_initial.clone(),
+                    current,
                     time_left.unwrap_or(Duration::MAX),
                     time_increment.unwrap_or(Duration::ZERO),
                 );
@@ -68,7 +82,9 @@ enum SearchMessage {
     Quit,
     StopSearching,
     ChangePosition {
-        gs: GameState,
+        initial: GameState,
+        moves_from_initial: Vec<Move>,
+        current: GameState,
         time_left: Duration,
         time_increment: Duration,
     },
@@ -77,7 +93,9 @@ enum SearchMessage {
 enum SearchState {
     Waiting,
     Searching {
-        gs: GameState,
+        initial: GameState,
+        moves_from_initial: Vec<Move>,
+        current: GameState,
         search: Search,
         deadline: Instant,
         stop: bool,
@@ -86,7 +104,8 @@ enum SearchState {
 }
 
 impl SearchThread {
-    /// Start a search
+    /// Start the perpetually running search thread.
+    /// It continus to search event when the opponent is thinking
     fn new() -> Self {
         let (message_tx, message_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
@@ -98,18 +117,29 @@ impl SearchThread {
                         _ => {}
                     },
                     Ok(SearchMessage::ChangePosition {
-                        gs,
+                        initial,
+                        moves_from_initial,
+                        current,
                         time_left,
                         time_increment,
                     }) => {
-                        let remaining_moves = (60_f64 - gs.fullmoves() as f64).max(10.0);
+                        // Some botched logic to determine the time to think
+                        let remaining_moves = if !time_increment.is_zero() {
+                            (40_f64 - current.fullmoves_count() as f64).max(20.0)
+                        } else {
+                            (80_f64 - current.fullmoves_count() as f64).max(40.0)
+                        };
                         let maximum_time_to_think = time_left.mul_f64(0.5);
                         let time_to_think = (time_left.div_f64(remaining_moves) + time_increment)
                             .min(maximum_time_to_think)
-                            .min(Duration::from_secs(9));
+                            .min(Duration::from_secs(10));
+
                         state = SearchState::Searching {
-                            gs,
-                            search: Search::start(gs),
+                            search: Search::start(initial, moves_from_initial.iter().copied())
+                                .unwrap(),
+                            initial,
+                            moves_from_initial,
+                            current,
                             deadline: Instant::now() + time_to_think,
                             stop: false,
                         };
@@ -120,7 +150,9 @@ impl SearchThread {
 
                 match state {
                     SearchState::Searching {
-                        ref gs,
+                        ref initial,
+                        ref moves_from_initial,
+                        ref current,
                         ref search,
                         deadline,
                         ref mut stop,
@@ -139,10 +171,10 @@ impl SearchThread {
                             "".to_string()
                         } else {
                             let mut string = String::new();
-                            let mut gs = *gs;
+                            let mut current = *current;
                             for mv in &status.pv {
-                                string = format!("{string} {}", mv.info(&gs));
-                                gs = gs.make_move(*mv).expect("PV move should be legal");
+                                string = format!("{string} {}", mv.info(&current));
+                                current = current.make_move(*mv).expect("PV move should be legal");
                             }
                             format!("pv {string}")
                         };
@@ -156,10 +188,17 @@ impl SearchThread {
                         if *stop {
                             match status.pv.first() {
                                 Some(best) => {
-                                    println!("bestmove {}", best.info(gs));
-                                    let next_gs =
-                                        gs.make_move(*best).expect("Best move should be legal");
-                                    state = SearchState::Pondering(Search::start(next_gs));
+                                    println!("bestmove {}", best.info(current));
+                                    state = SearchState::Pondering(
+                                        Search::start(
+                                            *initial,
+                                            moves_from_initial
+                                                .iter()
+                                                .copied()
+                                                .chain(std::iter::once(*best)),
+                                        )
+                                        .expect("Best move should be legal"),
+                                    );
                                 }
                                 None if !status.thinking => state = SearchState::Waiting,
                                 None => {}
@@ -179,10 +218,19 @@ impl SearchThread {
     }
 
     /// Set the position and search from there
-    fn start(&self, gs: GameState, time_left: Duration, time_increment: Duration) {
+    fn start(
+        &self,
+        initial: GameState,
+        moves_from_initial: Vec<Move>,
+        current: GameState,
+        time_left: Duration,
+        time_increment: Duration,
+    ) {
         self.message_tx
             .send(SearchMessage::ChangePosition {
-                gs,
+                initial,
+                moves_from_initial,
+                current,
                 time_left,
                 time_increment,
             })
@@ -216,14 +264,15 @@ fn recv_command() -> anyhow::Result<UciCommand> {
 }
 
 /// Make a move from a gamestate given its UCI notation
-fn make_move_with_notation(gs: &GameState, notation: &str) -> Option<GameState> {
+fn make_move_with_notation(gs: &GameState, notation: &str) -> Option<(Move, GameState)> {
     let mut available_moves = vec![];
     gs.pseudo_legal_moves(|mv| {
         if gs.make_move(mv).is_ok() {
             available_moves.push(mv)
         }
     });
-    find_move_with_notation(&gs, &available_moves, notation).and_then(|mv| gs.make_move(mv).ok())
+    let mv = find_move_with_notation(&gs, &available_moves, notation)?;
+    Some((mv, gs.make_move(mv).unwrap()))
 }
 
 fn find_move_with_notation(

@@ -21,6 +21,10 @@ impl GameStateHistory {
         }
     }
 
+    pub fn initial(&self) -> &GameState {
+        &self.initial
+    }
+
     pub fn current(&self) -> &GameState {
         &self.current
     }

@@ -3,7 +3,7 @@
 
 use rayon::prelude::*;
 
-use engine::{GameState, TableKey};
+use engine::GameState;
 use smallvec::SmallVec;
 
 // GameState + depth -> perft
@@ -13,7 +13,7 @@ fn perft(gs: &GameState, depth: u32, parallel: bool, cache: &Cache) -> u32 {
     if depth == 0 {
         return 1;
     }
-    let key = TableKey::with_extra(gs.key(), depth);
+    let key = gs.key().hash_with(depth);
     match cache.lookup(&key) {
         Some(value) => value,
         None => {

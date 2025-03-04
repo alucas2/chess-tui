@@ -2,6 +2,7 @@ mod atomic_cell;
 mod evaluate;
 mod fen;
 mod game_state;
+mod game_state_key;
 mod lookup_tables;
 mod move_predictor;
 mod moves;
@@ -12,9 +13,10 @@ use std::num::NonZeroU64;
 
 pub use evaluate::ScoreInfo;
 pub use game_state::GameState;
+pub use game_state_key::{GameStateKey, GameStateKeyExtra, GameStateKeyWithHash};
 pub use moves::{IllegalMoveError, Move, MoveFlag, MoveInfo};
 pub use search::{Search, SearchStatus};
-pub use transposition_table::{Table, TableKey};
+pub use transposition_table::Table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PieceKind {
@@ -77,6 +79,15 @@ impl Iterator for SquareIter {
         Some(sq)
     }
 }
+
+/// Array of 64 squares containing a piece kind and a player side.
+/// Uses a compact representation of 4 bits per square
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompactPieceArray([u64; 4]);
+
+/// Compact representation of various castle rights
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CastleRights(u8);
 
 impl PieceKind {
     #[inline]
@@ -275,5 +286,78 @@ impl SquareIndex {
     pub const fn mirror(self) -> SquareIndex {
         let (file, rank) = self.coords();
         SquareIndex::from_coords(file, rank.mirror())
+    }
+}
+
+impl Default for CompactPieceArray {
+    fn default() -> Self {
+        CompactPieceArray([0xffffffffffffffff; 4])
+    }
+}
+
+impl CompactPieceArray {
+    #[inline]
+    pub fn get(&self, sq: SquareIndex) -> Option<(PlayerSide, PieceKind)> {
+        // Get the 4-bit integer representing the content of the square
+        // b3 represents the side of the piece
+        // b2-b0 represent the kind of piece, or the absence of piece
+        let i = sq as usize;
+        let nibble = self.0[i / 16] >> (i % 16 * 4);
+        let kind = PieceKind::from_index(nibble as u8 & 0b0111)?;
+        let side = if nibble & 0b1000 == 0 {
+            PlayerSide::White
+        } else {
+            PlayerSide::Black
+        };
+        Some((side, kind))
+    }
+
+    #[inline]
+    pub fn set(&mut self, sq: SquareIndex, value: Option<(PlayerSide, PieceKind)>) {
+        let i = sq as usize;
+        let mask = 0b1111;
+        self.0[i / 16] |= mask << (i % 16 * 4);
+        if let Some((side, kind)) = value {
+            let nibble = kind as u64 | (side as u64) << 3;
+            self.0[i / 16] ^= (mask ^ nibble) << (i % 16 * 4);
+        }
+    }
+
+    #[inline]
+    pub fn mirror(&self) -> CompactPieceArray {
+        CompactPieceArray([
+            self.0[3].rotate_left(32),
+            self.0[2].rotate_left(32),
+            self.0[1].rotate_left(32),
+            self.0[0].rotate_left(32),
+        ])
+    }
+}
+
+impl Default for CastleRights {
+    fn default() -> Self {
+        CastleRights(0b11111111)
+    }
+}
+
+impl CastleRights {
+    pub fn get(&self, castle_side: CastleSide) -> Option<FileIndex> {
+        match castle_side {
+            CastleSide::East => FileIndex::from_index(self.0 & 0b00001111),
+            CastleSide::West => FileIndex::from_index(self.0 >> 4),
+        }
+    }
+
+    pub fn set(&mut self, castle_side: CastleSide, value: Option<FileIndex>) {
+        match castle_side {
+            CastleSide::East => match value {
+                Some(file) => self.0 = (self.0 & 0b11110000) | file as u8,
+                None => self.0 = (self.0 & 0b11110000) | 0b00001111,
+            },
+            CastleSide::West => match value {
+                Some(file) => self.0 = (self.0 & 0b00001111) | (file as u8) << 4,
+                None => self.0 = (self.0 & 0b00001111) | 0b11110000,
+            },
+        }
     }
 }

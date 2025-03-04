@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::{
     evaluate::{self, AtomicScore, Score},
     move_predictor::{self, MovePredictor},
-    GameState, Move, ScoreInfo, Table, TableKey,
+    GameState, GameStateKeyWithHash, IllegalMoveError, Move, ScoreInfo, Table,
 };
 
 /// Handle to the search thread
@@ -57,7 +57,7 @@ pub struct SearchStatistics {
 }
 
 /// Value that is updated during the search with the best move found so far
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct SearchResult {
     depth: u16,
     score: Score,
@@ -69,6 +69,7 @@ struct SearchContext<'a> {
     table: &'a Table<(), TableValue>,
     move_predictor: MovePredictor,
     statistics: SearchStatistics,
+    history: Vec<GameStateKeyWithHash>,
 }
 
 /// Values that are stored in the table.
@@ -105,15 +106,29 @@ const TABLE_NUM_ENTRIES: usize = 2_usize.pow(23);
 static TABLE: LazyLock<Table<(), TableValue>> = LazyLock::new(|| Table::new(TABLE_NUM_ENTRIES));
 
 impl Search {
-    pub fn start(gs: GameState) -> Self {
+    /// Start a search from an initial state and a list of moves made from it.
+    pub fn start(
+        initial: GameState,
+        moves_from_initial: impl Iterator<Item = Move>,
+    ) -> Result<Self, IllegalMoveError> {
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(3)
             .build_global();
+
+        // Reconstruct the last game state and the history
+        let mut gs = initial;
+        let mut history = vec![];
+        for mv in moves_from_initial {
+            history.push(gs.key().hash());
+            gs = gs.make_move(mv)?;
+        }
         let result = Arc::new(RwLock::new(SearchResult {
             depth: 1,
             score: Score::NEG_INF,
             best: None,
         }));
+
+        // Spawn the search thread
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(RwLock::new(SearchStatistics::default()));
         let start = time::Instant::now();
@@ -131,6 +146,7 @@ impl Search {
                         table: &TABLE,
                         move_predictor: MovePredictor::new(depth),
                         statistics: SearchStatistics::default(),
+                        history: history.clone(),
                     };
                     let final_score = eval_minmax_pv_split(
                         &gs,
@@ -148,14 +164,14 @@ impl Search {
                         break; // Stop deepening when a checkmate is found
                     }
                     if depth == 1 && result.read().unwrap().best.is_none() {
-                        break; // Current position is a checkmate or stalemate
+                        break; // Current position is a dead end
                     }
                 }
                 // Signal the end of the search
                 *finish.write().unwrap() = Some(time::Instant::now());
             })
         };
-        Search {
+        Ok(Search {
             gs,
             result,
             stop,
@@ -163,9 +179,10 @@ impl Search {
             handle: Some(handle),
             start,
             finish,
-        }
+        })
     }
 
+    /// Get the status of the search thread
     pub fn status(&self) -> SearchStatus {
         let result = self.result.read().unwrap().clone();
         let stats = self.stats.read().unwrap().clone();
@@ -180,7 +197,7 @@ impl Search {
                 let mut seen_positions = vec![];
                 loop {
                     gs = gs.make_move(mv).expect("PV move should be legal");
-                    let key = gs.key().into();
+                    let key = gs.key().hash();
                     if seen_positions.contains(&key) {
                         break; // PV forms a loop
                     }
@@ -193,7 +210,7 @@ impl Search {
                 }
                 pv
             }
-            None => vec![],
+            _ => vec![],
         };
         SearchStatus {
             thinking,
@@ -220,7 +237,7 @@ impl Drop for Search {
 /// Lookup a position in the table and take the opportunity to restrict the alpha and beta bounds.
 /// Returns (alpha, beta, best_move).
 fn lookup_table(
-    key: &TableKey<()>,
+    key: &GameStateKeyWithHash,
     mut alpha: Score,
     mut beta: Score,
     desired_depth: u16,
@@ -248,7 +265,7 @@ fn lookup_table(
 
 /// Update a position's entry in the table
 fn update_table(
-    key: TableKey<()>,
+    key: GameStateKeyWithHash,
     alpha: Score,
     beta: Score,
     depth: u16,
@@ -272,6 +289,29 @@ fn update_table(
     if ctx.table.update(key, table_value) {
         ctx.statistics.table_rewrites += 1;
     }
+}
+
+/// Probe the game state history for a threefold repeition or fiftymove draw
+fn is_draw(
+    key: &GameStateKeyWithHash,
+    fiftymove_counter: u16,
+    history: &[GameStateKeyWithHash],
+) -> bool {
+    if fiftymove_counter >= 50 {
+        return true;
+    }
+    let mut repetitions = 1;
+    let mut i = 2;
+    while i < fiftymove_counter as usize && i <= history.len() {
+        if &history[history.len() - i] == key {
+            repetitions += 1;
+            if repetitions == 3 {
+                return true;
+            }
+        }
+        i += 2;
+    }
+    false
 }
 
 /// Evaluate a position with a parallel minmax using "principal variation split"
@@ -305,9 +345,15 @@ fn eval_minmax_pv_split(
         }
     };
 
+    // Test for a draw position
+    let key = gs.key().hash();
+    if is_draw(&key, gs.fiftymove_count, &ctx.history) {
+        compare_update_argmax(Score::ZERO, None);
+        return Ok(Score::ZERO);
+    }
+
     // Lookup in the table
-    let table_key = gs.key().into();
-    let (alpha, beta, table_move) = match lookup_table(&table_key, alpha, beta, depth, ctx) {
+    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ctx) {
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
         (LookupResult::Cutoff { score }, best_move) => {
             compare_update_argmax(score, best_move);
@@ -318,6 +364,7 @@ fn eval_minmax_pv_split(
     let mut score = Score::NEG_INF;
     let mut best = None;
     ctx.statistics.expanded_nodes += 1;
+    ctx.history.push(key);
     let mut branches = Branches::new(table_move);
 
     // Search the first branch first, passing the parallel flag
@@ -354,6 +401,7 @@ fn eval_minmax_pv_split(
                 table: ctx.table,
                 move_predictor: MovePredictor::new(depth),
                 statistics: SearchStatistics::default(),
+                history: ctx.history.clone(),
             };
             let branch_score = -eval_minmax(&next, -beta, -alpha.max(score), depth - 1, &mut ctx)?;
             shared_score.fetch_max(branch_score);
@@ -369,6 +417,7 @@ fn eval_minmax_pv_split(
             Ok(())
         })?;
     (score, best) = shared_score_best.into_inner().unwrap();
+    ctx.history.pop();
 
     // NEG_INF means that this position is a dead end, so either checkmate or stalemate
     if score == Score::NEG_INF {
@@ -381,7 +430,7 @@ fn eval_minmax_pv_split(
     }
 
     // Store the result in the table
-    update_table(table_key, alpha, beta, depth, score, best, ctx);
+    update_table(key, alpha, beta, depth, score, best, ctx);
     Ok(score)
 }
 
@@ -400,9 +449,14 @@ fn eval_minmax(
         return Err(SearchInterrupted);
     }
 
+    // Test for a draw position
+    let key = gs.key().hash();
+    if is_draw(&key, gs.fiftymove_count, &ctx.history) {
+        return Ok(Score::ZERO);
+    }
+
     // Lookup in the table
-    let table_key = gs.key().into();
-    let (alpha, beta, table_move) = match lookup_table(&table_key, alpha, beta, depth, ctx) {
+    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ctx) {
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
         (LookupResult::Cutoff { score }, _) => return Ok(score),
     };
@@ -411,6 +465,7 @@ fn eval_minmax(
     let mut score = Score::NEG_INF;
     let mut best = None;
     ctx.statistics.expanded_nodes += 1;
+    ctx.history.push(key);
     let mut branches = Branches::new(table_move);
     while let Some(mv) =
         branches.next(|| generate_moves_with_predictor(gs, &ctx.move_predictor, depth))
@@ -428,18 +483,19 @@ fn eval_minmax(
             }
         }
     }
+    ctx.history.pop();
 
     // NEG_INF means that this position is a dead end, so either checkmate or stalemate
     if score == Score::NEG_INF {
         if gs.is_check() {
-            score = Score::MIN // Checkmake
+            score = Score::MIN // Checkmate
         } else {
             score = Score::ZERO // Stalemate
         }
     }
 
     // Store the result in the table
-    update_table(table_key, alpha, beta, depth, score, best, ctx);
+    update_table(key, alpha, beta, depth, score, best, ctx);
     Ok(score)
 }
 

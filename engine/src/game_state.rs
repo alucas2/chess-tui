@@ -1,4 +1,7 @@
-use crate::{CastleSide, FileIndex, PieceKind, PlayerSide, SquareIndex};
+use crate::{
+    game_state_key::GameStateKey, CastleRights, CompactPieceArray, FileIndex, PieceKind,
+    PlayerSide, SquareIndex,
+};
 
 /// State of the game.
 ///
@@ -27,28 +30,9 @@ pub struct GameState {
     pub(crate) fiftymove_count: u16,
 }
 
-/// Minimal amount of data that can uniqely identify a GameState.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GameStateKey {
-    pieces: CompactPieceArray,
-    side_to_move: PlayerSide,
-    friends_castle: CastleRights,
-    enemies_castle: CastleRights,
-    en_passant: Option<FileIndex>,
-}
-
 /// Array of 6 bitboards, one for each piece kind
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PieceBitboards([u64; 6]);
-
-/// Array of 64 squares containing a piece kind and a player side.
-/// Uses a compact representation of 4 bits per square
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct CompactPieceArray([u64; 4]);
-
-/// Compact representation of various gamestate flags
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CastleRights(u8);
 
 impl GameState {
     pub fn key(&self) -> GameStateKey {
@@ -188,75 +172,5 @@ impl std::ops::Index<PieceKind> for PieceBitboards {
 impl std::ops::IndexMut<PieceKind> for PieceBitboards {
     fn index_mut(&mut self, kind: PieceKind) -> &mut u64 {
         &mut self.0[kind as usize]
-    }
-}
-
-impl Default for CompactPieceArray {
-    fn default() -> Self {
-        CompactPieceArray([0xffffffffffffffff; 4])
-    }
-}
-
-impl CompactPieceArray {
-    pub(crate) fn get(&self, sq: SquareIndex) -> Option<(PlayerSide, PieceKind)> {
-        // Get the 4-bit integer representing the content of the square
-        // b3 represents the side of the piece
-        // b2-b0 represent the kind of piece, or the absence of piece
-        let i = sq as usize;
-        let nibble = self.0[i / 16] >> (i % 16 * 4);
-        let kind = PieceKind::from_index(nibble as u8 & 0b0111)?;
-        let side = if nibble & 0b1000 == 0 {
-            PlayerSide::White
-        } else {
-            PlayerSide::Black
-        };
-        Some((side, kind))
-    }
-
-    pub(crate) fn set(&mut self, sq: SquareIndex, value: Option<(PlayerSide, PieceKind)>) {
-        let i = sq as usize;
-        let mask = 0b1111;
-        self.0[i / 16] |= mask << (i % 16 * 4);
-        if let Some((side, kind)) = value {
-            let nibble = kind as u64 | (side as u64) << 3;
-            self.0[i / 16] ^= (mask ^ nibble) << (i % 16 * 4);
-        }
-    }
-
-    pub(crate) fn mirror(&self) -> CompactPieceArray {
-        CompactPieceArray([
-            self.0[3].rotate_left(32),
-            self.0[2].rotate_left(32),
-            self.0[1].rotate_left(32),
-            self.0[0].rotate_left(32),
-        ])
-    }
-}
-
-impl Default for CastleRights {
-    fn default() -> Self {
-        CastleRights(0b11111111)
-    }
-}
-
-impl CastleRights {
-    pub fn get(&self, castle_side: CastleSide) -> Option<FileIndex> {
-        match castle_side {
-            CastleSide::East => FileIndex::from_index(self.0 & 0b00001111),
-            CastleSide::West => FileIndex::from_index(self.0 >> 4),
-        }
-    }
-
-    pub fn set(&mut self, castle_side: CastleSide, value: Option<FileIndex>) {
-        match castle_side {
-            CastleSide::East => match value {
-                Some(file) => self.0 = (self.0 & 0b11110000) | file as u8,
-                None => self.0 = (self.0 & 0b11110000) | 0b00001111,
-            },
-            CastleSide::West => match value {
-                Some(file) => self.0 = (self.0 & 0b00001111) | (file as u8) << 4,
-                None => self.0 = (self.0 & 0b00001111) | 0b11110000,
-            },
-        }
     }
 }
