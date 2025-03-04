@@ -297,7 +297,7 @@ fn is_draw(
     fiftymove_counter: u16,
     history: &[GameStateKeyWithHash],
 ) -> bool {
-    if fiftymove_counter >= 50 {
+    if fiftymove_counter >= 100 {
         return true;
     }
     let mut repetitions = 1;

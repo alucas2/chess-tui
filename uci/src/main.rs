@@ -200,7 +200,10 @@ impl SearchThread {
                                         .expect("Best move should be legal"),
                                     );
                                 }
-                                None if !status.thinking => state = SearchState::Waiting,
+                                None if !status.thinking => {
+                                    println!("bestmove 0000");
+                                    state = SearchState::Waiting
+                                }
                                 None => {}
                             }
                         }
