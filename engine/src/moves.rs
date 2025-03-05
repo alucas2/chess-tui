@@ -83,18 +83,18 @@ impl GameState {
         self.pseudo_legal_moves_inner::<false, F>(f)
     }
 
-    /// Collect the pseudo-legal moves from the current, but only the captures.
-    pub(crate) fn pseudo_legal_captures<F: FnMut(Move)>(&self, f: F) {
+    /// Collect the pseudo-legal moves from the current, but only the non-quiet moves.
+    pub(crate) fn pseudo_legal_non_quiet_moves<F: FnMut(Move)>(&self, f: F) {
         self.pseudo_legal_moves_inner::<true, F>(f)
     }
 
     /// Call the provided closure on all pseudo-legal moves from the current state
-    fn pseudo_legal_moves_inner<const JUST_CAPTURES: bool, F: FnMut(Move)>(&self, mut f: F) {
+    fn pseudo_legal_moves_inner<const ONLY_NON_QUIET: bool, F: FnMut(Move)>(&self, mut f: F) {
         let friends_bb_union = self.friends_bb.union();
         let enemies_bb_union = self.enemies_bb.union();
         let blockers = friends_bb_union | enemies_bb_union;
 
-        let dst_mask = if JUST_CAPTURES {
+        let dst_mask = if ONLY_NON_QUIET {
             enemies_bb_union
         } else {
             !friends_bb_union
@@ -104,7 +104,7 @@ impl GameState {
         for from in SquareIter(self.friends_bb[Pawn] & !RankIndex::_7.bb().get()) {
             let from_bb = from.bb().get();
             let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
-            if JUST_CAPTURES {
+            if ONLY_NON_QUIET {
                 for to in SquareIter(captures) {
                     f(Move::normal(Pawn, from, to))
                 }
@@ -126,18 +126,10 @@ impl GameState {
             const PROMOTIONS: [PieceKind; 4] = [Queen, Knight, Bishop, Rook];
             let from_bb = from.bb().get();
             let captures = (lut::shift_ne(from_bb) | lut::shift_nw(from_bb)) & enemies_bb_union;
-            if JUST_CAPTURES {
-                for to in SquareIter(captures) {
-                    for prom in PROMOTIONS {
-                        f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
-                    }
-                }
-            } else {
-                let single_push = lut::shift_n(from_bb) & !blockers;
-                for to in SquareIter(captures | single_push) {
-                    for prom in PROMOTIONS {
-                        f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
-                    }
+            let single_push = lut::shift_n(from_bb) & !blockers;
+            for to in SquareIter(captures | single_push) {
+                for prom in PROMOTIONS {
+                    f(Move::with_flag(Pawn, from, to, MoveFlag::Promotion(prom)))
                 }
             }
         }
@@ -183,7 +175,7 @@ impl GameState {
         }
 
         // Castle
-        if !JUST_CAPTURES {
+        if !ONLY_NON_QUIET {
             for castle_side in [CastleSide::East, CastleSide::West] {
                 if let Some(file) = self.friends_castle.get(castle_side) {
                     if let Some(king_from) = SquareIter(self.friends_bb[King]).next() {

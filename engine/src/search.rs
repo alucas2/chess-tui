@@ -520,7 +520,7 @@ fn eval_quiescent(
 
     // Generate the captures and assign them a score
     ctx.statistics.expanded_nodes_quiescent += 1;
-    let mut moves = generate_captures(gs);
+    let mut moves = generate_non_quiet_moves(gs);
 
     // Pop and explore the branches, starting from the most promising
     while let Some(mv) = take_highest_move(&mut moves) {
@@ -561,9 +561,9 @@ fn generate_moves_with_predictor(
     moves
 }
 
-fn generate_captures(gs: &GameState) -> SmallVec<[MoveWithKey; 16]> {
+fn generate_non_quiet_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 16]> {
     let mut moves = SmallVec::new();
-    gs.pseudo_legal_captures(|mv| moves.push(MoveWithKey { mv, key: 0 }));
+    gs.pseudo_legal_non_quiet_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
         *key = move_predictor::eval(gs, *mv);
     }
