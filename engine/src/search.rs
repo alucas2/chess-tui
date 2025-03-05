@@ -302,7 +302,7 @@ fn is_draw(
     }
     let mut repetitions = 1;
     let mut i = 2;
-    while i < fiftymove_counter as usize && i <= history.len() {
+    while i <= fiftymove_counter as usize && i <= history.len() {
         if &history[history.len() - i] == key {
             repetitions += 1;
             if repetitions == 3 {
