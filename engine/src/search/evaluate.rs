@@ -14,15 +14,6 @@ pub struct Score(pub(crate) i16);
 #[repr(transparent)]
 pub struct AtomicScore(AtomicI16);
 
-#[derive(Debug, Clone, Copy)]
-pub enum ScoreInfo {
-    Normal(i16),
-    /// Position is a win in the specified number of moves
-    Win(u16),
-    /// Position is a loss in the specified number of moves
-    Loose(u16),
-}
-
 impl Score {
     pub const ZERO: Score = Score(0);
     pub const MAX: Score = Score(i16::MAX);

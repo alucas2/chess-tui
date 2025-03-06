@@ -1,21 +1,18 @@
 mod atomic_cell;
-mod evaluate;
 mod fen;
 mod game_state;
 mod game_state_key;
 mod lookup_tables;
-mod move_predictor;
 mod moves;
 mod search;
 mod transposition_table;
 
 use std::num::NonZeroU64;
 
-pub use evaluate::ScoreInfo;
 pub use game_state::GameState;
 pub use game_state_key::{GameStateKey, GameStateKeyExtra, GameStateKeyWithHash};
 pub use moves::{IllegalMoveError, Move, MoveFlag, MoveInfo};
-pub use search::{Search, SearchStatus};
+pub use search::{settings, ScoreInfo, Search, SearchStatus};
 pub use transposition_table::Table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

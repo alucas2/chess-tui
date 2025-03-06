@@ -3,9 +3,6 @@ use crate::{
     game_state_key::{GameStateKeyExtra, GameStateKeyExtraWithHash},
 };
 
-/// Size of a table entry is:
-/// `8 + 36 + size_of::<X> + size_of::<V>`
-/// Where 8 corresponds to the size of the seqlock and 36 the size of the gamestate
 pub struct Table<X, V> {
     entries: Vec<AtomicCell<Option<Entry<X, V>>>>,
 }
@@ -17,8 +14,11 @@ struct Entry<X, V> {
 }
 
 impl<X: Eq + Copy, V: Copy> Table<X, V> {
+    pub const fn entry_size() -> usize {
+        size_of::<AtomicCell<Option<Entry<X, V>>>>()
+    }
+
     pub fn new(capacity: usize) -> Table<X, V> {
-        assert_eq!(size_of::<AtomicCell<Option<Entry<X, V>>>>(), 64);
         Table {
             entries: (0..capacity).map(|_| AtomicCell::new(None)).collect(),
         }

@@ -1,4 +1,6 @@
-use crate::{evaluate, GameState, Move, MoveFlag, MoveInfo, PieceKind, PlayerSide, SquareIndex};
+use crate::{GameState, Move, MoveFlag, MoveInfo, PieceKind, PlayerSide, SquareIndex};
+
+use super::evaluate;
 
 const NUM_KILLER_MOVES: usize = 3;
 
@@ -90,10 +92,11 @@ impl MovePredictor {
                 } else {
                     // Bonus from history
                     // Ranges from 0 to 255
-                    (match gs.side_to_move {
-                        PlayerSide::White => self.history_white[mvi.kind as usize][mvi.to as usize],
-                        PlayerSide::Black => self.history_black[mvi.kind as usize][mvi.to as usize],
-                    }) as i16
+                    let history = match gs.side_to_move {
+                        PlayerSide::White => &self.history_white,
+                        PlayerSide::Black => &self.history_black,
+                    };
+                    history[mvi.kind as usize][mvi.to as usize] as i16
                 }
             }
         }
@@ -109,11 +112,23 @@ impl MovePredictor {
                 killer_moves[0] = Some(mv);
             }
             // Increase the history value
-            let value = match gs.side_to_move {
-                PlayerSide::White => &mut self.history_white[mv.kind as usize][mv.to as usize],
-                PlayerSide::Black => &mut self.history_black[mv.kind as usize][mv.to as usize],
+            let history = match gs.side_to_move {
+                PlayerSide::White => &mut self.history_white,
+                PlayerSide::Black => &mut self.history_black,
             };
-            *value = (*value).saturating_add(1);
+            if history[mv.kind as usize][mv.to as usize] == u8::MAX {
+                fade_out_values(history);
+            }
+            history[mv.kind as usize][mv.to as usize] += 1;
+        }
+    }
+}
+
+/// Divide all values in the history by 2, to gain more room for increase
+fn fade_out_values(values: &mut [[u8; 64]; 6]) {
+    for i in 0..6 {
+        for j in 0..64 {
+            values[i][j] >>= 1;
         }
     }
 }

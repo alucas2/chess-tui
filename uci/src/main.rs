@@ -1,5 +1,5 @@
 use anyhow::bail;
-use engine::{GameState, Move, PlayerSide, ScoreInfo, Search};
+use engine::{settings, GameState, Move, PlayerSide, ScoreInfo, Search};
 use std::{
     io,
     sync::mpsc,
@@ -23,14 +23,28 @@ fn main() -> anyhow::Result<()> {
             UciCommand::Uci => {
                 println!("id name BlunderCrab");
                 println!("id author alucas2");
-                println!("option name Hash type spin default 1 min 1 max 256");
+                println!(
+                    "option name Hash type spin default {} min 1 max 4096",
+                    settings::DEFAULT_TABLE_SIZE_MB
+                );
                 println!("option name UCI_Chess960 type check default false");
+                println!(
+                    "option name Threads type spin default {} min 1 max 4",
+                    settings::DEFAULT_NUM_THREADS
+                );
                 println!("uciok");
             }
             UciCommand::Debug(_) => {}
             UciCommand::IsReady => println!("readyok"),
-            UciCommand::SetOption { name, .. } => match name.as_str() {
-                "Hash" => {}
+            UciCommand::SetOption { name, value } => match name.as_str() {
+                "Hash" => {
+                    let megabytes = value.unwrap_or_default().parse()?;
+                    settings::set_table_size_megabytes(megabytes)
+                }
+                "Threads" => {
+                    let threads = value.unwrap_or_default().parse()?;
+                    settings::set_num_threads(threads);
+                }
                 "UCI_Chess960" => {}
                 other => bail!("Unknown option {other}"),
             },

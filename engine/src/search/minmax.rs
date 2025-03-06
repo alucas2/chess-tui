@@ -1,51 +1,35 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, LazyLock, Mutex, RwLock,
-    },
-    thread, time,
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, RwLock,
 };
 
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use smallvec::SmallVec;
 
-use crate::{
+use crate::{GameState, GameStateKeyWithHash, Move};
+
+use super::{
     evaluate::{self, AtomicScore, Score},
     move_predictor::{self, MovePredictor},
-    GameState, GameStateKeyWithHash, IllegalMoveError, Move, ScoreInfo, Table,
+    shared_table::{ScoreKind, Table, TableValue},
+    SearchInterrupted,
 };
 
-/// Handle to the search thread
-pub struct Search {
-    gs: GameState,
-    result: Arc<RwLock<SearchResult>>,
-    stop: Arc<AtomicBool>,
-    stats: Arc<RwLock<SearchStatistics>>,
-    handle: Option<thread::JoinHandle<()>>,
-    start: time::Instant,
-    finish: Arc<RwLock<Option<time::Instant>>>,
-}
-
-/// Status of the search that is updated by the search thread
-#[derive(Clone)]
-pub struct SearchStatus {
-    /// Indicates if the search thread is still running
-    pub thinking: bool,
-    /// Depth of the search that gave the current result
-    pub depth: u16,
-    /// Score assigned to the searched position
-    pub score: ScoreInfo,
-    /// Best move from the search position. Is None if no moves are available
-    /// because the game is lost or if it's too early in the search to know
-    pub pv: Vec<Move>,
+pub struct MinmaxContext<'a> {
+    /// Shared flag that is set when the search must stop
+    pub stop: &'a AtomicBool,
+    /// Shared transposition table
+    pub table: &'a Table,
+    /// Stateful move predictor
+    pub move_predictor: MovePredictor,
     /// Search performance metrics
-    pub stats: SearchStatistics,
-    /// Time elapsed
-    pub elapsed: time::Duration,
+    pub statistics: MinmaxStatistics,
+    /// Stack of previous game states, used to detect draws
+    pub history: Vec<GameStateKeyWithHash>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SearchStatistics {
+pub struct MinmaxStatistics {
     /// Number of nodes for which we explored the moves
     pub expanded_nodes: u64,
     /// Number of nodes for which we explored the moves in quiescent search
@@ -56,45 +40,16 @@ pub struct SearchStatistics {
     pub table_rewrites: u64,
 }
 
-/// Value that is updated during the search with the best move found so far
 #[derive(Clone, Copy)]
-struct SearchResult {
-    depth: u16,
-    score: Score,
-    best: Option<Move>,
-}
-
-struct SearchContext<'a> {
-    stop: &'a AtomicBool,
-    table: &'a Table<(), TableValue>,
-    move_predictor: MovePredictor,
-    statistics: SearchStatistics,
-    history: Vec<GameStateKeyWithHash>,
-}
-
-/// Values that are stored in the table.
-/// Its size should not be excessive to fit within a table entry
-#[derive(Clone, Copy)]
-struct TableValue {
-    depth: u16,
-    score: Score,
-    score_kind: ScoreKind,
-    best: Option<Move>,
-}
-
-#[derive(Clone, Copy)]
-enum ScoreKind {
-    Exact,
-    AtLeast,
-    AtMost,
-}
-
-struct SearchInterrupted;
-
-/// Stores a move and a rough evaluation of the move to compare it to other moves
-struct MoveWithKey {
-    mv: Move,
-    key: i16,
+pub struct MinmaxResult {
+    /// Depth of the current evaluation
+    pub depth: u16,
+    /// Current evaluation
+    pub score: Score,
+    /// Best move so far. None can mean multiple things:
+    /// - it's too early in the search and no move have been examined yet
+    /// - the current position is a dead end so there is no possible move
+    pub best: Option<Move>,
 }
 
 enum LookupResult {
@@ -102,136 +57,10 @@ enum LookupResult {
     Cutoff { score: Score },
 }
 
-const TABLE_NUM_ENTRIES: usize = 2_usize.pow(23);
-static TABLE: LazyLock<Table<(), TableValue>> = LazyLock::new(|| Table::new(TABLE_NUM_ENTRIES));
-
-impl Search {
-    /// Start a search from an initial state and a list of moves made from it.
-    pub fn start(
-        initial: GameState,
-        moves_from_initial: impl Iterator<Item = Move>,
-    ) -> Result<Self, IllegalMoveError> {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(3)
-            .build_global();
-
-        // Reconstruct the last game state and the history
-        let mut gs = initial;
-        let mut history = vec![];
-        for mv in moves_from_initial {
-            history.push(gs.key().hash());
-            gs = gs.make_move(mv)?;
-        }
-        let result = Arc::new(RwLock::new(SearchResult {
-            depth: 1,
-            score: Score::NEG_INF,
-            best: None,
-        }));
-
-        // Spawn the search thread
-        let stop = Arc::new(AtomicBool::new(false));
-        let stats = Arc::new(RwLock::new(SearchStatistics::default()));
-        let start = time::Instant::now();
-        let finish = Arc::new(RwLock::new(None));
-        let handle = {
-            let result = Arc::clone(&result);
-            let stop = Arc::clone(&stop);
-            let stats = Arc::clone(&stats);
-            let finish = Arc::clone(&finish);
-            thread::spawn(move || {
-                // Iterative deepening
-                for depth in 1..=20 {
-                    let mut ctx = SearchContext {
-                        stop: &stop,
-                        table: &TABLE,
-                        move_predictor: MovePredictor::new(depth),
-                        statistics: SearchStatistics::default(),
-                        history: history.clone(),
-                    };
-                    let final_score = eval_minmax_pv_split(
-                        &gs,
-                        Score::MIN,
-                        Score::MAX,
-                        depth,
-                        &mut ctx,
-                        Some(&result),
-                    );
-                    stats.write().unwrap().add(&ctx.statistics);
-                    let Ok(final_score) = final_score else {
-                        break; // Search has been interrupted
-                    };
-                    if final_score == Score::MAX || final_score == Score::MIN {
-                        break; // Stop deepening when a checkmate is found
-                    }
-                    if depth == 1 && result.read().unwrap().best.is_none() {
-                        break; // Current position is a dead end
-                    }
-                }
-                // Signal the end of the search
-                *finish.write().unwrap() = Some(time::Instant::now());
-            })
-        };
-        Ok(Search {
-            gs,
-            result,
-            stop,
-            stats,
-            handle: Some(handle),
-            start,
-            finish,
-        })
-    }
-
-    /// Get the status of the search thread
-    pub fn status(&self) -> SearchStatus {
-        let result = self.result.read().unwrap().clone();
-        let stats = self.stats.read().unwrap().clone();
-        let (elapsed, thinking) = match *self.finish.read().unwrap() {
-            Some(finish) => (finish - self.start, false),
-            None => (self.start.elapsed(), true),
-        };
-        let pv = match result.best {
-            Some(mut mv) => {
-                let mut gs = self.gs;
-                let mut pv = vec![mv];
-                let mut seen_positions = vec![];
-                loop {
-                    gs = gs.make_move(mv).expect("PV move should be legal");
-                    let key = gs.key().hash();
-                    if seen_positions.contains(&key) {
-                        break; // PV forms a loop
-                    }
-                    mv = match TABLE.lookup(&key) {
-                        Some(TableValue { best: Some(mv), .. }) => mv,
-                        _ => break, // PV stops here
-                    };
-                    pv.push(mv);
-                    seen_positions.push(key);
-                }
-                pv
-            }
-            _ => vec![],
-        };
-        SearchStatus {
-            thinking,
-            depth: result.depth,
-            score: match result.score {
-                Score::MAX => ScoreInfo::Win(result.depth - 1),
-                Score::MIN => ScoreInfo::Loose(result.depth - 1),
-                Score(x) => ScoreInfo::Normal(x),
-            },
-            pv,
-            stats,
-            elapsed,
-        }
-    }
-}
-
-impl Drop for Search {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.handle.take().unwrap().join();
-    }
+struct MoveWithKey {
+    mv: Move,
+    /// Rough evaluation of the move to compare it to other moves
+    key: i16,
 }
 
 /// Lookup a position in the table and take the opportunity to restrict the alpha and beta bounds.
@@ -241,7 +70,7 @@ fn lookup_table(
     mut alpha: Score,
     mut beta: Score,
     desired_depth: u16,
-    ctx: &mut SearchContext,
+    ctx: &mut MinmaxContext,
 ) -> (LookupResult, Option<Move>) {
     let table_move = match ctx.table.lookup(key) {
         Some(e) => {
@@ -271,7 +100,7 @@ fn update_table(
     depth: u16,
     score: Score,
     best: Option<Move>,
-    ctx: &mut SearchContext,
+    ctx: &mut MinmaxContext,
 ) {
     let score_kind = if score <= alpha {
         ScoreKind::AtMost // Could not reach alpha, the exact score is unknown
@@ -315,13 +144,13 @@ fn is_draw(
 }
 
 /// Evaluate a position with a parallel minmax using "principal variation split"
-fn eval_minmax_pv_split(
+pub fn eval_minmax_pv_split(
     gs: &GameState,
     alpha: Score,
     beta: Score,
     depth: u16,
-    ctx: &mut SearchContext,
-    argmax: Option<&RwLock<SearchResult>>,
+    ctx: &mut MinmaxContext,
+    argmax: Option<&RwLock<MinmaxResult>>,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
         return Ok(eval_quiescent(gs, Score::MIN, Score::MAX, ctx)?);
@@ -336,7 +165,7 @@ fn eval_minmax_pv_split(
         if let Some(argmax) = argmax {
             let mut argmax = argmax.write().unwrap();
             if depth > argmax.depth || new_score > argmax.score {
-                *argmax = SearchResult {
+                *argmax = MinmaxResult {
                     depth,
                     score: new_score,
                     best: new_best,
@@ -396,11 +225,11 @@ fn eval_minmax_pv_split(
             if score >= beta {
                 return Ok(()); // Cutoff
             }
-            let mut ctx = SearchContext {
+            let mut ctx = MinmaxContext {
                 stop: ctx.stop,
                 table: ctx.table,
                 move_predictor: MovePredictor::new(depth),
-                statistics: SearchStatistics::default(),
+                statistics: MinmaxStatistics::default(),
                 history: ctx.history.clone(),
             };
             let branch_score = -eval_minmax(&next, -beta, -alpha.max(score), depth - 1, &mut ctx)?;
@@ -440,7 +269,7 @@ fn eval_minmax(
     alpha: Score,
     beta: Score,
     depth: u16,
-    ctx: &mut SearchContext,
+    ctx: &mut MinmaxContext,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
         return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
@@ -504,7 +333,7 @@ fn eval_quiescent(
     gs: &GameState,
     mut alpha: Score,
     beta: Score,
-    ctx: &mut SearchContext,
+    ctx: &mut MinmaxContext,
 ) -> Result<Score, SearchInterrupted> {
     if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
@@ -577,15 +406,25 @@ fn take_highest_move<A: smallvec::Array<Item = MoveWithKey>>(
     Some(moves.swap_remove(index).mv)
 }
 
-impl SearchStatistics {
-    fn add(&mut self, other: &SearchStatistics) {
-        *self = SearchStatistics {
+impl MinmaxStatistics {
+    pub fn add(&mut self, other: &MinmaxStatistics) {
+        *self = MinmaxStatistics {
             expanded_nodes: self.expanded_nodes + other.expanded_nodes,
             expanded_nodes_quiescent: self.expanded_nodes_quiescent
                 + other.expanded_nodes_quiescent,
             table_hits: self.table_hits + other.table_hits,
             table_rewrites: self.table_rewrites + other.table_rewrites,
         };
+    }
+}
+
+impl Default for MinmaxResult {
+    fn default() -> Self {
+        MinmaxResult {
+            depth: 1,
+            score: Score::NEG_INF,
+            best: None,
+        }
     }
 }
 
