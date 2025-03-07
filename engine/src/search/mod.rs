@@ -99,7 +99,7 @@ impl Search {
                     let mut ctx = MinmaxContext {
                         stop: &stop,
                         table: &shared_table::get(),
-                        move_predictor: MovePredictor::new(depth),
+                        move_predictor: MovePredictor::new(depth + 1),
                         statistics: MinmaxStatistics::default(),
                         history: history.clone(),
                     };

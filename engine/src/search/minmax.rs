@@ -3,6 +3,7 @@ use std::sync::{
     Mutex, RwLock,
 };
 
+use branch_iterator::Branch;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use smallvec::SmallVec;
 
@@ -190,73 +191,79 @@ pub fn eval_minmax_pv_split(
         }
     };
 
-    let mut score = Score::NEG_INF;
-    let mut best = None;
+    // Explore the branches
     ctx.statistics.expanded_nodes += 1;
     ctx.history.push(key);
-    let mut branches = Branches::new(table_move);
-
-    // Search the first branch first, passing the parallel flag
-    // This method is called PV-splitting
-    while let Some(mv) = branches.next(|| generate_moves(gs)) {
-        let Ok(next) = gs.make_move(mv) else {
-            continue;
-        };
-        let branch_score = -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, ctx, None)?;
-        best = Some(mv);
-        score = branch_score;
-        compare_update_argmax(score, best);
-        break; // First branch exploration complete
-    }
-
-    // Search the remaining branches in parallel
-    let shared_score = AtomicScore::new(score);
-    let shared_score_best = Mutex::new((score, best));
-    let shared_stat = Mutex::new(&mut ctx.statistics);
-    std::iter::from_fn(|| branches.next(|| generate_moves(gs)))
-        .par_bridge()
-        .try_for_each(|mv| {
-            let Ok(next) = gs.make_move(mv) else {
-                return Ok(()); // Illegal move
-            };
-
-            // Read the shared score value that other threads might have updated
-            let score = shared_score.load();
-            if score >= beta {
-                return Ok(()); // Cutoff
-            }
-            let mut ctx = MinmaxContext {
-                stop: ctx.stop,
-                table: ctx.table,
-                move_predictor: MovePredictor::new(depth),
-                statistics: MinmaxStatistics::default(),
-                history: ctx.history.clone(),
-            };
-            let branch_score = -eval_minmax(&next, -beta, -alpha.max(score), depth - 1, &mut ctx)?;
-            shared_score.fetch_max(branch_score);
-            shared_stat.lock().unwrap().add(&ctx.statistics);
-
-            // Lock score and best together to keep them in sync
-            let mut score_best = shared_score_best.lock().unwrap();
-            if branch_score > score_best.0 {
-                score_best.1 = Some(mv);
-                compare_update_argmax(branch_score, score_best.1);
-            }
-            score_best.0 = score_best.0.max(branch_score);
-            Ok(())
-        })?;
-    (score, best) = shared_score_best.into_inner().unwrap();
-    ctx.history.pop();
-
-    // NEG_INF means that this position is a dead end, so either checkmate or stalemate
-    if score == Score::NEG_INF {
-        if gs.is_check() {
-            score = Score::MIN // Checkmate
+    let (score, best) = if let Some((Branch { mv, next }, rest)) =
+        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, depth)
+    {
+        // Search the first branch first, passing the parallel flag
+        // This method is called PV-splitting
+        let mut best = mv;
+        let mut score = -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, ctx, None)?;
+        compare_update_argmax(score, Some(mv));
+        if score >= beta {
+            // Cutoff (no need to update the move predictor because we don't use it here)
         } else {
-            score = Score::ZERO // Stalemate
+            // The remaining branches are explored in parallel
+            let shared_score = AtomicScore::new(score);
+            let shared_score_and_best = Mutex::new((score, best));
+            let shared_stat = Mutex::new(&mut ctx.statistics);
+            rest.get_or_generate(&ctx.move_predictor, depth)
+                .par_bridge()
+                .try_for_each(|Branch { mv, next }| {
+                    let mut score = shared_score.load();
+                    if score >= beta {
+                        return Ok(()); // Cutoff (first opportunity)
+                    }
+
+                    // Explore with minimal bounds to test if it can beat the current score
+                    let mut ctx = MinmaxContext {
+                        stop: ctx.stop,
+                        table: ctx.table,
+                        move_predictor: MovePredictor::new(depth),
+                        statistics: MinmaxStatistics::default(),
+                        history: ctx.history.clone(),
+                    };
+                    let (lo, hi) = (-alpha.max(score)).minimal_window();
+                    let temp = -eval_minmax(&next, lo, hi, depth - 1, &mut ctx)?;
+
+                    // If the branch beats the current score, we might need to re-explore
+                    score = shared_score.load();
+                    if score >= beta {
+                        return Ok(()); // Cutoff (second opportunity)
+                    }
+                    if temp > score {
+                        score = if temp > alpha && temp < beta {
+                            -eval_minmax(&next, -beta, -temp, depth - 1, &mut ctx)?
+                        } else {
+                            temp
+                        };
+                        shared_score.fetch_max(score);
+                        let mut score_and_best = shared_score_and_best.lock().unwrap();
+                        if score > score_and_best.0 {
+                            score_and_best.0 = score;
+                            score_and_best.1 = mv;
+                            compare_update_argmax(score, Some(mv));
+                        }
+                    }
+                    shared_stat.lock().unwrap().add(&ctx.statistics);
+                    Ok(())
+                })?;
+            (score, best) = shared_score_and_best.into_inner().unwrap();
         }
-        compare_update_argmax(score, None);
-    }
+        (score, Some(best))
+    } else {
+        // No branches to explore
+        if gs.is_check() {
+            compare_update_argmax(Score::MIN, None);
+            (Score::MIN, None) // Checkmate
+        } else {
+            compare_update_argmax(Score::ZERO, None);
+            (Score::ZERO, None) // Stalemate
+        }
+    };
+    ctx.history.pop();
 
     // Store the result in the table
     update_table(key, alpha, beta, depth, score, best, ctx);
@@ -290,38 +297,49 @@ fn eval_minmax(
         (LookupResult::Cutoff { score }, _) => return Ok(score),
     };
 
-    // Pop and explore the branches, starting from the most promising
-    let mut score = Score::NEG_INF;
-    let mut best = None;
+    // Explore the branches
     ctx.statistics.expanded_nodes += 1;
     ctx.history.push(key);
-    let mut branches = Branches::new(table_move);
-    while let Some(mv) =
-        branches.next(|| generate_moves_with_predictor(gs, &ctx.move_predictor, depth))
+    let (score, best) = if let Some((Branch { mv, next }, rest)) =
+        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, depth)
     {
-        let Ok(next) = gs.make_move(mv) else {
-            continue;
-        };
-        let branch_score = -eval_minmax(&next, -beta, -alpha.max(score), depth - 1, ctx)?;
-        if branch_score > score {
-            best = Some(mv);
-            score = branch_score;
-            if score >= beta {
-                ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth);
-                break; // Cutoff
+        // The first branch is explored normally
+        let mut best = mv;
+        let mut score = -eval_minmax(&next, -beta, -alpha, depth - 1, ctx)?;
+        if score >= beta {
+            ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth); // Cutoff
+        } else {
+            // The remaining branches are explored with a "principal variation search"
+            for Branch { mv, next } in rest.get_or_generate(&ctx.move_predictor, depth) {
+                // Explore with minimal bounds to test if it can beat the current score
+                let (lo, hi) = (-alpha.max(score)).minimal_window();
+                let temp = -eval_minmax(&next, lo, hi, depth - 1, ctx)?;
+
+                // If the branch beats the current score, we might need to re-explore
+                if temp > score {
+                    best = mv;
+                    score = if temp > alpha && temp < beta {
+                        -eval_minmax(&next, -beta, -temp, depth - 1, ctx)?
+                    } else {
+                        temp
+                    };
+                    if score >= beta {
+                        ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth); // Cutoff
+                        break;
+                    }
+                }
             }
         }
-    }
-    ctx.history.pop();
-
-    // NEG_INF means that this position is a dead end, so either checkmate or stalemate
-    if score == Score::NEG_INF {
+        (score, Some(best))
+    } else {
+        // No branches to explore
         if gs.is_check() {
-            score = Score::MIN // Checkmate
+            (Score::MIN, None) // Checkmate
         } else {
-            score = Score::ZERO // Stalemate
+            (Score::ZERO, None) // Stalemate
         }
-    }
+    };
+    ctx.history.pop();
 
     // Store the result in the table
     update_table(key, alpha, beta, depth, score, best, ctx);
@@ -368,20 +386,9 @@ fn eval_quiescent(
     Ok(score)
 }
 
-fn generate_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 64]> {
-    let mut moves = SmallVec::new();
-    gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
-    for MoveWithKey { mv, key } in moves.iter_mut() {
-        *key = move_predictor::eval(gs, *mv);
-    }
-    moves
-}
+type MoveList = SmallVec<[MoveWithKey; 64]>;
 
-fn generate_moves_with_predictor(
-    gs: &GameState,
-    mp: &MovePredictor,
-    depth: u16,
-) -> SmallVec<[MoveWithKey; 64]> {
+fn generate_moves_with_predictor(gs: &GameState, mp: &MovePredictor, depth: u16) -> MoveList {
     let mut moves = SmallVec::<[_; 64]>::new();
     gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
@@ -390,7 +397,9 @@ fn generate_moves_with_predictor(
     moves
 }
 
-fn generate_non_quiet_moves(gs: &GameState) -> SmallVec<[MoveWithKey; 16]> {
+type NonQuietMoveList = SmallVec<[MoveWithKey; 16]>;
+
+fn generate_non_quiet_moves(gs: &GameState) -> NonQuietMoveList {
     let mut moves = SmallVec::new();
     gs.pseudo_legal_non_quiet_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
     for MoveWithKey { mv, key } in moves.iter_mut() {
@@ -428,54 +437,89 @@ impl Default for MinmaxResult {
     }
 }
 
-enum Branches<A: smallvec::Array<Item = MoveWithKey>> {
-    TableMove(Option<Move>),
-    RestUngenerated {
-        table_mv: Option<Move>,
-    },
-    RestGenerated {
-        table_mv: Option<Move>,
-        rest: SmallVec<A>,
-    },
-}
+mod branch_iterator {
+    use super::*;
 
-impl<A: smallvec::Array<Item = MoveWithKey>> Branches<A> {
-    pub fn new(table_move: Option<Move>) -> Self {
-        Branches::TableMove(table_move)
+    pub struct Branch {
+        pub mv: Move,
+        pub next: GameState,
     }
 
-    pub fn next<F: FnOnce() -> SmallVec<A>>(&mut self, f: F) -> Option<Move> {
-        match self {
-            Branches::TableMove(table_move) => match table_move.take() {
-                Some(mv) => {
-                    *self = Branches::RestUngenerated { table_mv: Some(mv) };
-                    Some(mv) // Yield the table move
-                }
-                None => {
-                    *self = Branches::RestUngenerated { table_mv: None };
-                    self.next(f)
-                }
-            },
-            Branches::RestUngenerated { table_mv } => {
-                let rest = f();
-                let table_mv = *table_mv;
-                *self = Branches::RestGenerated { table_mv, rest };
-                self.next_rest()
+    pub struct RestLazy<'a> {
+        gs: &'a GameState,
+        exclude: Option<Move>,
+        rest: Option<MoveList>,
+    }
+
+    pub struct Rest<'a> {
+        gs: &'a GameState,
+        exclude: Option<Move>,
+        rest: MoveList,
+    }
+
+    pub fn first_and_rest<'a>(
+        gs: &'a GameState,
+        table_move: Option<Move>,
+        move_predictor: &MovePredictor,
+        depth: u16,
+    ) -> Option<(Branch, RestLazy<'a>)> {
+        match table_move {
+            Some(mv) => {
+                let next = gs.make_move(mv).expect("Table move should be legal");
+                Some((
+                    Branch { mv, next },
+                    RestLazy {
+                        gs,
+                        exclude: table_move,
+                        rest: None,
+                    },
+                ))
             }
-            Branches::RestGenerated { .. } => self.next_rest(),
+            None => {
+                let mut rest = generate_moves_with_predictor(gs, move_predictor, depth);
+                loop {
+                    let mv = take_highest_move(&mut rest)?;
+                    if let Ok(next) = gs.make_move(mv) {
+                        break Some((
+                            Branch { mv, next },
+                            RestLazy {
+                                gs,
+                                exclude: None,
+                                rest: Some(rest),
+                            },
+                        ));
+                    }
+                }
+            }
         }
     }
 
-    fn next_rest(&mut self) -> Option<Move> {
-        match self {
-            Branches::RestGenerated { table_mv, rest } => loop {
-                let (index, _) = rest.iter().enumerate().max_by_key(|(_, mv)| mv.key)?;
-                let mv = rest.swap_remove(index).mv;
-                if Some(mv) != *table_mv {
-                    break Some(mv); // Yield a generated move
+    impl<'a> RestLazy<'a> {
+        pub fn get_or_generate(self, move_predictor: &MovePredictor, depth: u16) -> Rest<'a> {
+            Rest {
+                gs: self.gs,
+                exclude: self.exclude,
+                rest: match self.rest {
+                    Some(rest) => rest,
+                    None => generate_moves_with_predictor(self.gs, move_predictor, depth),
+                },
+            }
+        }
+    }
+
+    impl<'a> Iterator for Rest<'a> {
+        type Item = Branch;
+
+        fn next(&mut self) -> Option<Branch> {
+            loop {
+                let mv = take_highest_move(&mut self.rest)?;
+                if Some(mv) == self.exclude {
+                    continue;
                 }
-            },
-            _ => unreachable!(),
+                if let Ok(next) = self.gs.make_move(mv) {
+                    break Some(Branch { mv, next });
+                }
+            }
         }
     }
 }

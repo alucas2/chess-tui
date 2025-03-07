@@ -19,6 +19,14 @@ impl Score {
     pub const MAX: Score = Score(i16::MAX);
     pub const MIN: Score = Score(-i16::MAX);
     pub const NEG_INF: Score = Score(i16::MIN);
+
+    /// Create a minimal window of (score-1, score)
+    pub fn minimal_window(&self) -> (Score, Score) {
+        assert!(*self != Self::NEG_INF);
+        let alpha = Score(self.0 - 1);
+        let beta = *self;
+        (alpha, beta)
+    }
 }
 
 impl std::ops::Neg for Score {
