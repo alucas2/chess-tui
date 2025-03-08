@@ -1,6 +1,10 @@
 use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::{lookup_tables as lut, FileIndex, GameState, PieceKind, SquareIndex, SquareIter};
+use crate::{
+    lookup_tables as lut, FileIndex, GameState,
+    PieceKind::{self, *},
+    SquareIndex, SquareIter,
+};
 
 /// Opaque score that can be compared with other scores.
 /// Score::MAX represents a winning position. Score::MIN represents a losing position.
@@ -58,42 +62,45 @@ pub fn eval(gs: &GameState) -> Score {
     let mut bonus = 0;
     let blockers = gs.friends_bb.union() | gs.enemies_bb.union();
     for kind in PieceKind::iter() {
-        let table_midgame = piece_value_table_midgame(kind);
-        let table_endgame = piece_value_table_endgame(kind);
-        let flat_value = piece_value(kind);
+        // Add the value of friend pieces
         for sq in SquareIter(gs.friends_bb[kind]) {
-            total_material += flat_value;
-            material_diff_midgame += table_midgame[sq as usize];
-            material_diff_endgame += table_endgame[sq as usize];
-            bonus += mobility_bonus(kind, sq, blockers);
+            let (midgame_value, endgame_value, extra_value) =
+                friend_piece_value(kind, sq, blockers, gs.enemies_bb[Pawn]);
+            total_material += piece_value(kind);
+            material_diff_midgame += midgame_value;
+            material_diff_endgame += endgame_value;
+            bonus += extra_value;
         }
+        // Subtract the value of enemy pieces
         for sq in SquareIter(gs.enemies_bb[kind]) {
-            total_material += flat_value;
-            material_diff_midgame -= table_midgame[sq.mirror() as usize];
-            material_diff_endgame -= table_endgame[sq.mirror() as usize];
-            bonus -= mobility_bonus(kind, sq, blockers);
+            let (midgame_value, endgame_value, extra_value) = friend_piece_value(
+                kind,
+                sq.mirror(),
+                blockers.swap_bytes(),
+                gs.friends_bb[Pawn].swap_bytes(),
+            );
+            total_material += piece_value(kind);
+            material_diff_midgame -= midgame_value;
+            material_diff_endgame -= endgame_value;
+            bonus -= extra_value;
         }
     }
 
     // Malus for multiple pawns on the same file
     for file in FileIndex::iter() {
         let bb = file.bb().get();
-        if (gs.friends_bb[PieceKind::Pawn] & bb).count_ones() > 1 {
-            bonus -= piece_value(PieceKind::Pawn) / 2;
+        if (gs.friends_bb[Pawn] & bb).count_ones() > 1 {
+            bonus -= piece_value(Pawn) / 2;
         }
-        if (gs.enemies_bb[PieceKind::Pawn] & bb).count_ones() > 1 {
-            bonus += piece_value(PieceKind::Pawn) / 2;
+        if (gs.enemies_bb[Pawn] & bb).count_ones() > 1 {
+            bonus += piece_value(Pawn) / 2;
         }
     }
 
     // Blend the midgame and engame material values
-    // 10000 is considered the beginning of the game, 6000 the end of the game
+    // 10000 is considered the beginning of the game, 5000 the end of the game
     let material_diff_blend = {
-        // let midgame_factor = ((total_material as f32 - 6000.0) / 4000.0).clamp(0.0, 1.0);
-        // let material_diff_midgame = material_diff_midgame as f32 * midgame_factor;
-        // let material_diff_endgame = material_diff_endgame as f32 * (1.0 - midgame_factor);
-        // (material_diff_midgame + material_diff_endgame).round() as i16
-        let midgame_factor = (total_material - 6000).max(0).saturating_mul(8);
+        let midgame_factor = (total_material - 5000).max(0).saturating_mul(8);
         let endgame_factor = i16::MAX - midgame_factor;
         let material_diff_midgame = (material_diff_midgame as i32 * midgame_factor as i32) >> 16;
         let material_diff_endgame = (material_diff_endgame as i32 * endgame_factor as i32) >> 16;
@@ -102,31 +109,39 @@ pub fn eval(gs: &GameState) -> Score {
     Score(material_diff_blend + bonus)
 }
 
-/// Compute a bonus score for based on how many squares are reachable by a piece
-fn mobility_bonus(kind: PieceKind, sq: SquareIndex, blockers: u64) -> i16 {
-    match kind {
-        PieceKind::Pawn => 0,
-        PieceKind::Knight => 0,
-        PieceKind::Bishop => 4 * lut::bishop_reachable(sq, blockers).count_ones() as i16,
-        PieceKind::Rook => 4 * lut::rook_reachable(sq, blockers).count_ones() as i16,
-        PieceKind::Queen => {
-            2 * (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+fn friend_piece_value(
+    kind: PieceKind,
+    sq: SquareIndex,
+    blockers: u64,
+    enemy_pawns: u64,
+) -> (i16, i16, i16) {
+    let enemy_pawn_safe = !(lut::shift_se(enemy_pawns) | lut::shift_sw(enemy_pawns));
+    let midgame_value = piece_value_table_midgame(kind)[sq as usize];
+    let endgame_value = piece_value_table_endgame(kind)[sq as usize];
+    let extra_value = match kind {
+        Knight => 2 * (lut::knight_reachable(sq) & enemy_pawn_safe).count_ones() as i16,
+        Bishop => 4 * (lut::bishop_reachable(sq, blockers) & enemy_pawn_safe).count_ones() as i16,
+        Rook => 4 * (lut::rook_reachable(sq, blockers) & enemy_pawn_safe).count_ones() as i16,
+        Queen => {
+            2 * ((lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+                & enemy_pawn_safe)
                 .count_ones() as i16
         }
-        PieceKind::King => 0,
-    }
+        _ => 0,
+    };
+    (midgame_value, endgame_value, extra_value)
 }
 
 /// Get the piece-square value table for a kind of piece.
 /// The table is indexed from white's point of view.
 pub fn piece_value_table_midgame(kind: PieceKind) -> &'static [i16; 64] {
     match kind {
-        PieceKind::Pawn => &PAWN_VALUE,
-        PieceKind::Knight => &KNIGHT_VALUE,
-        PieceKind::Bishop => &BISHOP_VALUE,
-        PieceKind::Rook => &ROOK_VALUE,
-        PieceKind::Queen => &QUEEN_VALUE,
-        PieceKind::King => &KING_VALUE,
+        Pawn => &PAWN_VALUE,
+        Knight => &KNIGHT_VALUE,
+        Bishop => &BISHOP_VALUE,
+        Rook => &ROOK_VALUE,
+        Queen => &QUEEN_VALUE,
+        King => &KING_VALUE,
     }
 }
 
@@ -134,24 +149,24 @@ pub fn piece_value_table_midgame(kind: PieceKind) -> &'static [i16; 64] {
 /// The table is indexed from white's point of view.
 pub fn piece_value_table_endgame(kind: PieceKind) -> &'static [i16; 64] {
     match kind {
-        PieceKind::Pawn => &PAWN_VALUE_ENDGAME,
-        PieceKind::Knight => &KNIGHT_VALUE,
-        PieceKind::Bishop => &BISHOP_VALUE,
-        PieceKind::Rook => &ROOK_VALUE,
-        PieceKind::Queen => &QUEEN_VALUE,
-        PieceKind::King => &KING_VALUE_ENDGAME,
+        Pawn => &PAWN_VALUE_ENDGAME,
+        Knight => &KNIGHT_VALUE,
+        Bishop => &BISHOP_VALUE,
+        Rook => &ROOK_VALUE,
+        Queen => &QUEEN_VALUE,
+        King => &KING_VALUE_ENDGAME,
     }
 }
 
 /// Get the flat value of a kind of piece
 pub fn piece_value(kind: PieceKind) -> i16 {
     match kind {
-        PieceKind::Pawn => 100,
-        PieceKind::Knight => 320,
-        PieceKind::Bishop => 330,
-        PieceKind::Rook => 500,
-        PieceKind::Queen => 900,
-        PieceKind::King => 1000,
+        Pawn => 100,
+        Knight => 320,
+        Bishop => 330,
+        Rook => 500,
+        Queen => 900,
+        King => 1000,
     }
 }
 
