@@ -1,4 +1,6 @@
-use crate::SquareIndex;
+use std::num::NonZeroU64;
+
+use crate::{game_state::PieceBitboards, PieceKind, SquareIndex};
 
 /// Get the square that are reachable by a king
 pub fn king_reachable(pos: SquareIndex) -> u64 {
@@ -49,6 +51,103 @@ pub fn castle_ray(from: SquareIndex, to: SquareIndex) -> u64 {
         result |= RAYS[from as usize].w ^ RAYS[to as usize].w
     };
     result
+}
+
+pub fn is_dangerous(pos: SquareIndex, enemies: &PieceBitboards, blockers: u64) -> bool {
+    let bb = pos.bb().get();
+    (shift_ne(bb) | shift_nw(bb)) & enemies[PieceKind::Pawn] != 0
+        || knight_reachable(pos) & enemies[PieceKind::Knight] != 0
+        || king_reachable(pos) & enemies[PieceKind::King] != 0
+        || is_attacked_by_rook(
+            pos,
+            blockers,
+            enemies[PieceKind::Rook] | enemies[PieceKind::Queen],
+        )
+        || is_attacked_by_bishop(
+            pos,
+            blockers,
+            enemies[PieceKind::Bishop] | enemies[PieceKind::Queen],
+        )
+}
+
+pub fn is_attacked_by_rook(pos: SquareIndex, blockers: u64, targets: u64) -> bool {
+    // Equivalent to: get_attacked_by_rook(pos, blockers, targets).is_some()
+    let rays = RAYS[pos as usize];
+    hit_rightmost_bit(rays.n & blockers, targets)
+        || hit_rightmost_bit(rays.e & blockers, targets)
+        || hit_leftmost_bit(rays.s & blockers, targets)
+        || hit_leftmost_bit(rays.w & blockers, targets)
+}
+
+pub fn is_attacked_by_bishop(pos: SquareIndex, blockers: u64, targets: u64) -> bool {
+    // Equivalent to: get_attacked_by_bishop(pos, blockers, targets).is_some()
+    let rays = RAYS[pos as usize];
+    hit_rightmost_bit(rays.ne & blockers, targets)
+        || hit_rightmost_bit(rays.nw & blockers, targets)
+        || hit_leftmost_bit(rays.se & blockers, targets)
+        || hit_leftmost_bit(rays.sw & blockers, targets)
+}
+
+pub fn get_attacked_by_rook(pos: SquareIndex, blockers: u64, targets: u64) -> Option<SquareIndex> {
+    let rays = RAYS[pos as usize];
+    if let Some(x) = NonZeroU64::new(get_rightmost_bit(rays.n & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    if let Some(x) = NonZeroU64::new(get_rightmost_bit(rays.e & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    if let Some(x) = NonZeroU64::new(get_leftmost_bit(rays.s & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    if let Some(x) = NonZeroU64::new(get_leftmost_bit(rays.w & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    None
+}
+
+pub fn get_attacked_by_bishop(
+    pos: SquareIndex,
+    blockers: u64,
+    targets: u64,
+) -> Option<SquareIndex> {
+    let rays = RAYS[pos as usize];
+    if let Some(x) = NonZeroU64::new(get_rightmost_bit(rays.ne & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    if let Some(x) = NonZeroU64::new(get_rightmost_bit(rays.nw & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    if let Some(x) = NonZeroU64::new(get_leftmost_bit(rays.se & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    if let Some(x) = NonZeroU64::new(get_leftmost_bit(rays.sw & blockers) & targets) {
+        return Some(SquareIndex::from_bb(x));
+    }
+    None
+}
+
+/// Test if the leftmost bit of a is in b
+fn hit_leftmost_bit(a: u64, b: u64) -> bool {
+    (a & b) > (a & !b)
+}
+
+/// Test if the rightmost bit of a is in b
+fn hit_rightmost_bit(a: u64, b: u64) -> bool {
+    a & !(a - 1) & b != 0
+}
+
+/// Mask out the leftmost bit of a
+fn get_leftmost_bit(a: u64) -> u64 {
+    if a == 0 {
+        0
+    } else {
+        1 << (63 - a.leading_zeros())
+    }
+}
+
+/// Mask out the rightmost bit of a
+fn get_rightmost_bit(a: u64) -> u64 {
+    a & !(a - 1)
 }
 
 /// Knight moves from each square (512 bytes)

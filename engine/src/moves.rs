@@ -1,5 +1,5 @@
 use crate::{
-    game_state::{GameState, PieceBitboards},
+    game_state::GameState,
     lookup_tables as lut, CastleSide,
     PieceKind::{self, *},
     PlayerSide, RankIndex, SquareIndex, SquareIter,
@@ -262,7 +262,7 @@ impl GameState {
                 let blockers = self.friends_bb.union() | self.enemies_bb.union();
                 let (king_to, rook_to) = castle_destinations(castle_side);
                 for sq in SquareIter(lut::castle_ray(mv.from, king_to)) {
-                    if is_dangerous(sq, self.enemies_bb, blockers) {
+                    if lut::is_dangerous(sq, &self.enemies_bb, blockers) {
                         return Err(IllegalMoveError); // Cannot castle through danger
                     }
                 }
@@ -277,7 +277,7 @@ impl GameState {
             // Check that the move does not put the king in danger
             let blockers = self.friends_bb.union() | self.enemies_bb.union();
             for sq in SquareIter(self.friends_bb[King]) {
-                if is_dangerous(sq, self.enemies_bb, blockers) {
+                if lut::is_dangerous(sq, &self.enemies_bb, blockers) {
                     return Err(IllegalMoveError);
                 }
             }
@@ -353,23 +353,23 @@ impl GameState {
         if let Some(from) = SquareIter(attackers).next() {
             return Some(Move::normal(Pawn, from, sq));
         }
-        // Knight, Bishop, Rook or Queen move, in that order
-        let blockers = self.friends_bb.union() | self.enemies_bb.union();
+        // Knight moves
         let attackers = lut::knight_reachable(sq) & self.friends_bb[Knight];
         if let Some(from) = SquareIter(attackers).next() {
             return Some(Move::normal(Knight, from, sq));
         }
-        let attackers = lut::bishop_reachable(sq, blockers) & self.friends_bb[Bishop];
-        if let Some(from) = SquareIter(attackers).next() {
+        // Bishop, Rook and Queen moves, in that order
+        let blockers = self.friends_bb.union() | self.enemies_bb.union();
+        if let Some(from) = lut::get_attacked_by_bishop(sq, blockers, self.friends_bb[Bishop]) {
             return Some(Move::normal(Bishop, from, sq));
         }
-        let attackers = lut::rook_reachable(sq, blockers) & self.friends_bb[Rook];
-        if let Some(from) = SquareIter(attackers).next() {
+        if let Some(from) = lut::get_attacked_by_rook(sq, blockers, self.friends_bb[Rook]) {
             return Some(Move::normal(Rook, from, sq));
         }
-        let attackers = (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
-            & self.friends_bb[Queen];
-        if let Some(from) = SquareIter(attackers).next() {
+        if let Some(from) = lut::get_attacked_by_bishop(sq, blockers, self.friends_bb[Queen]) {
+            return Some(Move::normal(Queen, from, sq));
+        }
+        if let Some(from) = lut::get_attacked_by_rook(sq, blockers, self.friends_bb[Queen]) {
             return Some(Move::normal(Queen, from, sq));
         }
         // Pawn promotion
@@ -389,20 +389,9 @@ impl GameState {
 
     pub fn is_check(&self) -> bool {
         let blockers = self.friends_bb.union() | self.enemies_bb.union();
-        SquareIter(self.friends_bb[King]).any(|sq| is_dangerous(sq, self.enemies_bb, blockers))
+        SquareIter(self.friends_bb[King])
+            .any(|sq| lut::is_dangerous(sq, &self.enemies_bb, blockers))
     }
-}
-
-/// Check whether a square is attackable by an enemy
-fn is_dangerous(sq: SquareIndex, enemies_bb: PieceBitboards, obstacles: u64) -> bool {
-    let sq_bb = sq.bb().get();
-    let mut attackers = 0;
-    attackers |= (lut::shift_ne(sq_bb) | lut::shift_nw(sq_bb)) & enemies_bb[Pawn];
-    attackers |= lut::knight_reachable(sq) & enemies_bb[Knight];
-    attackers |= lut::bishop_reachable(sq, obstacles) & (enemies_bb[Bishop] | enemies_bb[Queen]);
-    attackers |= lut::rook_reachable(sq, obstacles) & (enemies_bb[Rook] | enemies_bb[Queen]);
-    attackers |= lut::king_reachable(sq) & enemies_bb[King];
-    attackers != 0
 }
 
 /// Get the destination squares for the king and rook during castling
