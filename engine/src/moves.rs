@@ -259,11 +259,13 @@ impl GameState {
                     MoveFlag::CastleWest => CastleSide::West,
                     _ => unreachable!(),
                 };
-                let blockers = self.friends_bb.union() | self.enemies_bb.union();
                 let (king_to, rook_to) = castle_destinations(castle_side);
-                for sq in SquareIter(lut::castle_ray(mv.from, king_to)) {
-                    if lut::is_dangerous(sq, &self.enemies_bb, blockers) {
-                        return Err(IllegalMoveError); // Cannot castle through danger
+                if CHECK_LEGAL {
+                    let blockers = self.friends_bb.union() | self.enemies_bb.union();
+                    for sq in SquareIter(lut::castle_ray(mv.from, king_to)) {
+                        if lut::is_dangerous(sq, &self.enemies_bb, blockers) {
+                            return Err(IllegalMoveError); // Cannot castle through danger
+                        }
                     }
                 }
                 self.remove_piece(mv.from, self.side_to_move, King);

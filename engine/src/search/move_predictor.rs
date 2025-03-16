@@ -1,4 +1,7 @@
-use crate::{GameState, Move, MoveFlag, MoveInfo, PieceKind, PlayerSide, SquareIndex};
+use crate::{
+    lookup_tables as lut, GameState, Move, MoveFlag, MoveInfo, PieceKind, PlayerSide, SquareIndex,
+    SquareIter,
+};
 
 use super::evaluate;
 
@@ -65,13 +68,22 @@ impl MovePredictor {
         let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
+        const CHECK_BONUS: i16 = 18000;
+
+        let next_gs = gs.make_move_exchange_eval(mv);
+        if let Some(sq) = SquareIter(next_gs.friends_bb[PieceKind::King]).next() {
+            let blockers = next_gs.friends_bb.union() | next_gs.enemies_bb.union();
+            if lut::is_dangerous(sq, &next_gs.enemies_bb, blockers) {
+                // Prioritize a move that puts the enemy king in check
+                return CHECK_BONUS;
+            }
+        }
         match gs.pieces.get(mvi.to) {
             Some((_, victim))
                 if !matches!(mvi.flag, MoveFlag::CastleEast | MoveFlag::CastleWest) =>
             {
                 // Static exchange evaluation for captures
                 // Ranges from approx. -18000 to +18000
-                let next_gs = gs.make_move_exchange_eval(mv);
                 let capture_gain = evaluate::piece_value(victim)
                     - static_exchange_eval(&next_gs, mvi.to.mirror(), mvi.kind);
                 match capture_gain {
