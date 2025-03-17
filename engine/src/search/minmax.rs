@@ -121,7 +121,14 @@ fn update_table(
     }
 }
 
-/// Probe the game state history for a threefold repeition or fiftymove draw
+/// Probe the game state history for a threefold repeition or fiftymove draw.
+///
+/// NOTE: Forced draws should not be stored in the transposition table
+/// or else tranpositions could incorrectly be labelled as draw.
+/// This measure does not exactly solve the issue of "draw contamination",
+/// e.g. when the search avoids a branch because the enemy threatens to force a draw,
+/// then store its score in the table, and later probe this "draw contaminated" score
+/// even though the draw threat no longer exists.
 fn is_draw(
     key: &GameStateKeyWithHash,
     fiftymove_counter: u16,

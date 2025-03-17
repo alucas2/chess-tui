@@ -173,8 +173,8 @@ impl Search {
             thinking,
             depth: result.depth,
             score: match result.score {
-                Score::MAX => ScoreInfo::Win(result.depth - 1),
-                Score::MIN => ScoreInfo::Loose(result.depth - 1),
+                Score::MAX => ScoreInfo::Win(result.depth / 2),
+                Score::MIN => ScoreInfo::Loose(result.depth / 2),
                 Score(x) => ScoreInfo::Normal(x),
             },
             pv,
