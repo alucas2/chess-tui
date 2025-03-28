@@ -53,6 +53,28 @@ pub fn castle_ray(from: SquareIndex, to: SquareIndex) -> u64 {
     result
 }
 
+/// Get the squares that are in front and on the same file.
+/// Used to test for blocked pawns
+pub fn in_front(pos: SquareIndex) -> u64 {
+    RAYS[pos as usize].n
+}
+
+/// Get the squares that are in front, on the same file or in adjacent files.
+/// Used to test for passed pawns
+pub fn in_front_and_adjacent_files(pos: SquareIndex) -> u64 {
+    let mask = RAYS[pos as usize].n;
+    mask | shift_e(mask) | shift_w(mask)
+}
+
+/// Get the ajacent files (not the current file).
+/// Used to test for isolated pawns
+pub fn adjacent_files(pos: SquareIndex) -> u64 {
+    let (file, _) = pos.coords();
+    let mask = file.bb().get();
+    shift_e(mask) | shift_w(mask)
+}
+
+/// Test if a square is reachable by any enemy
 pub fn is_dangerous(pos: SquareIndex, enemies: &PieceBitboards, blockers: u64) -> bool {
     let bb = pos.bb().get();
     (shift_ne(bb) | shift_nw(bb)) & enemies[PieceKind::Pawn] != 0
@@ -70,6 +92,7 @@ pub fn is_dangerous(pos: SquareIndex, enemies: &PieceBitboards, blockers: u64) -
         )
 }
 
+/// Test if any of the target squares is reachable by a rook at pos
 pub fn is_attacked_by_rook(pos: SquareIndex, blockers: u64, targets: u64) -> bool {
     // Equivalent to: get_attacked_by_rook(pos, blockers, targets).is_some()
     let rays = RAYS[pos as usize];
@@ -79,6 +102,7 @@ pub fn is_attacked_by_rook(pos: SquareIndex, blockers: u64, targets: u64) -> boo
         || hit_leftmost_bit(rays.w & blockers, targets)
 }
 
+/// Test if any of the target squares is reachable by a bishop as pos
 pub fn is_attacked_by_bishop(pos: SquareIndex, blockers: u64, targets: u64) -> bool {
     // Equivalent to: get_attacked_by_bishop(pos, blockers, targets).is_some()
     let rays = RAYS[pos as usize];
@@ -88,6 +112,7 @@ pub fn is_attacked_by_bishop(pos: SquareIndex, blockers: u64, targets: u64) -> b
         || hit_leftmost_bit(rays.sw & blockers, targets)
 }
 
+/// Get one of the target squares that is reachable by a rook at pos
 pub fn get_attacked_by_rook(pos: SquareIndex, blockers: u64, targets: u64) -> Option<SquareIndex> {
     let rays = RAYS[pos as usize];
     if let Some(x) = NonZeroU64::new(get_rightmost_bit(rays.n & blockers) & targets) {
@@ -105,6 +130,7 @@ pub fn get_attacked_by_rook(pos: SquareIndex, blockers: u64, targets: u64) -> Op
     None
 }
 
+/// Get one of the target squares that is reachable by a bishop at pos
 pub fn get_attacked_by_bishop(
     pos: SquareIndex,
     blockers: u64,
@@ -160,7 +186,7 @@ const KING_REACHABLE: [u64; 64] = compile_time::generate_king_lut();
 const RAYS: [Rays; 64] = compile_time::generate_rays_lut();
 
 #[derive(Debug, Clone, Copy)]
-struct Rays {
+pub struct Rays {
     pub n: u64,
     pub s: u64,
     pub e: u64,

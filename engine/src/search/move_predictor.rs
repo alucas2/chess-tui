@@ -68,17 +68,10 @@ impl MovePredictor {
         let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
-        const CHECK_BONUS: i16 = 18000;
+        const CHECK_BONUS: i16 = 14000;
 
         let next_gs = gs.make_move_exchange_eval(mv);
-        if let Some(sq) = SquareIter(next_gs.friends_bb[PieceKind::King]).next() {
-            let blockers = next_gs.friends_bb.union() | next_gs.enemies_bb.union();
-            if lut::is_dangerous(sq, &next_gs.enemies_bb, blockers) {
-                // Prioritize a move that puts the enemy king in check
-                return CHECK_BONUS;
-            }
-        }
-        match gs.pieces.get(mvi.to) {
+        let mut score = match gs.pieces.get(mvi.to) {
             Some((_, victim))
                 if !matches!(mvi.flag, MoveFlag::CastleEast | MoveFlag::CastleWest) =>
             {
@@ -111,7 +104,15 @@ impl MovePredictor {
                     history[mvi.kind as usize][mvi.to as usize] as i16
                 }
             }
+        };
+        if let Some(sq) = SquareIter(next_gs.friends_bb[PieceKind::King]).next() {
+            let blockers = next_gs.friends_bb.union() | next_gs.enemies_bb.union();
+            if lut::is_dangerous(sq, &next_gs.enemies_bb, blockers) {
+                // Prioritize a move that puts the enemy king in check
+                score += CHECK_BONUS;
+            }
         }
+        score
     }
 
     pub fn apply_cutoff_bonus(&mut self, gs: &GameState, mv: Move, depth: u16) {

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicI16, Ordering};
 
 use crate::{
-    lookup_tables as lut, FileIndex, GameState,
+    lookup_tables as lut, GameState,
     PieceKind::{self, *},
     SquareIndex, SquareIter,
 };
@@ -61,11 +61,13 @@ pub fn eval(gs: &GameState) -> Score {
     let mut material_diff_endgame = 0;
     let mut bonus = 0;
     let blockers = gs.friends_bb.union() | gs.enemies_bb.union();
+    let enemies_pawns = gs.enemies_bb[Pawn];
+    let friends_pawns = gs.friends_bb[Pawn];
     for kind in PieceKind::iter() {
         // Add the value of friend pieces
         for sq in SquareIter(gs.friends_bb[kind]) {
             let (midgame_value, endgame_value, extra_value) =
-                friend_piece_value(kind, sq, blockers, gs.enemies_bb[Pawn]);
+                friend_piece_value(kind, sq, blockers, friends_pawns, enemies_pawns);
             total_material += piece_value(kind);
             material_diff_midgame += midgame_value;
             material_diff_endgame += endgame_value;
@@ -77,7 +79,8 @@ pub fn eval(gs: &GameState) -> Score {
                 kind,
                 sq.mirror(),
                 blockers.swap_bytes(),
-                gs.friends_bb[Pawn].swap_bytes(),
+                enemies_pawns.swap_bytes(),
+                friends_pawns.swap_bytes(),
             );
             total_material += piece_value(kind);
             material_diff_midgame -= midgame_value;
@@ -86,24 +89,13 @@ pub fn eval(gs: &GameState) -> Score {
         }
     }
 
-    // Malus for multiple pawns on the same file
-    for file in FileIndex::iter() {
-        let bb = file.bb().get();
-        if (gs.friends_bb[Pawn] & bb).count_ones() > 1 {
-            bonus -= piece_value(Pawn) / 2;
-        }
-        if (gs.enemies_bb[Pawn] & bb).count_ones() > 1 {
-            bonus += piece_value(Pawn) / 2;
-        }
-    }
-
     // Blend the midgame and engame material values
     // 10000 is considered the beginning of the game, 5000 the end of the game
     let material_diff_blend = {
         let midgame_factor = (total_material - 5000).max(0).saturating_mul(8);
         let endgame_factor = i16::MAX - midgame_factor;
-        let material_diff_midgame = (material_diff_midgame as i32 * midgame_factor as i32) >> 16;
-        let material_diff_endgame = (material_diff_endgame as i32 * endgame_factor as i32) >> 16;
+        let material_diff_midgame = (material_diff_midgame as i32 * midgame_factor as i32) >> 15;
+        let material_diff_endgame = (material_diff_endgame as i32 * endgame_factor as i32) >> 15;
         (material_diff_midgame + material_diff_endgame) as i16
     };
     Score(material_diff_blend + bonus)
@@ -113,21 +105,40 @@ fn friend_piece_value(
     kind: PieceKind,
     sq: SquareIndex,
     blockers: u64,
-    enemy_pawns: u64,
+    friends_pawns: u64,
+    enemies_pawns: u64,
 ) -> (i16, i16, i16) {
-    let enemy_pawn_safe = !(lut::shift_se(enemy_pawns) | lut::shift_sw(enemy_pawns));
+    let mobility_mask = !(lut::shift_se(enemies_pawns) | lut::shift_sw(enemies_pawns));
     let midgame_value = piece_value_table_midgame(kind)[sq as usize];
     let endgame_value = piece_value_table_endgame(kind)[sq as usize];
     let extra_value = match kind {
-        Knight => 2 * (lut::knight_reachable(sq) & enemy_pawn_safe).count_ones() as i16,
-        Bishop => 4 * (lut::bishop_reachable(sq, blockers) & enemy_pawn_safe).count_ones() as i16,
-        Rook => 4 * (lut::rook_reachable(sq, blockers) & enemy_pawn_safe).count_ones() as i16,
+        Pawn => {
+            let mut pawn_score = 0;
+            if lut::in_front(sq) & friends_pawns != 0 {
+                pawn_score -= 20 // Malus for multiple pawns on the same file
+            }
+            if lut::adjacent_files(sq) & friends_pawns == 0 {
+                pawn_score -= 20 // Malus for isolated pawns
+            }
+            if lut::in_front_and_adjacent_files(sq) & enemies_pawns == 0 {
+                pawn_score += 50 // Bonus for passed pawns
+            }
+            pawn_score
+        }
+        // Knight, bishop, rook and queen receive a mobility bonus
+        Knight => 2 * (lut::knight_reachable(sq) & mobility_mask).count_ones() as i16,
+        Bishop => 4 * (lut::bishop_reachable(sq, blockers) & mobility_mask).count_ones() as i16,
+        Rook => 4 * (lut::rook_reachable(sq, blockers) & mobility_mask).count_ones() as i16,
         Queen => {
             2 * ((lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
-                & enemy_pawn_safe)
+                & mobility_mask)
                 .count_ones() as i16
         }
-        _ => 0,
+        // Malus for a king that is too exposed
+        King => {
+            -1 * (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+                .count_ones() as i16
+        }
     };
     (midgame_value, endgame_value, extra_value)
 }

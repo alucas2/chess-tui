@@ -95,7 +95,7 @@ impl Search {
             let finish = Arc::clone(&finish);
             thread::spawn(move || {
                 // Iterative deepening
-                for depth in 1..=20 {
+                for depth in 1..=30 {
                     let mut ctx = MinmaxContext {
                         stop: &stop,
                         table: &shared_table::get(),
