@@ -178,8 +178,8 @@ impl SearchThread {
                         // Print some info
                         let score = match status.score {
                             ScoreInfo::Normal(x) => format!("score cp {x}"),
-                            ScoreInfo::Win(x) => format!("score mate {x}"),
-                            ScoreInfo::Loose(x) => format!("score mate -{x}"),
+                            ScoreInfo::Win(x) => format!("score mate {}", x / 2 + 1),
+                            ScoreInfo::Loss(x) => format!("score mate -{}", x / 2),
                         };
                         let pv = if status.pv.is_empty() {
                             "".to_string()

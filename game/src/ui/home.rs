@@ -228,7 +228,7 @@ impl Home {
                 (x.to_string(), r)
             }
             ScoreInfo::Win(x) => (format!("M{x}"), 1.0),
-            ScoreInfo::Loose(x) => (format!("-M{x}"), 0.0),
+            ScoreInfo::Loss(x) => (format!("-M{x}"), 0.0),
         };
         if self.gamestate.current().side_to_move() == PlayerSide::Black {
             gauge_ratio = 1.0 - gauge_ratio;

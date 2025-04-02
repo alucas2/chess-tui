@@ -71,19 +71,26 @@ fn lookup_table(
     mut alpha: Score,
     mut beta: Score,
     desired_depth: u16,
+    ply: u16,
     ctx: &mut MinmaxContext,
 ) -> (LookupResult, Option<Move>) {
+    // Restrict alpha and beta within the loss/win bounds for the current ply
+    alpha = alpha.max(Score::LOSS.add_ply(ply));
+    beta = beta.min(Score::WIN.add_ply(ply + 1));
+
+    // Restrict alpha and beta further by probing the transposition table
     let table_move = match ctx.table.lookup(key) {
         Some(e) => {
             ctx.statistics.table_hits += 1;
             if e.depth == desired_depth {
+                let score = e.score.add_ply(ply);
                 match e.score_kind {
-                    ScoreKind::Exact => return (LookupResult::Cutoff { score: e.score }, e.best),
-                    ScoreKind::AtLeast => alpha = alpha.max(e.score),
-                    ScoreKind::AtMost => beta = beta.min(e.score),
+                    ScoreKind::Exact => return (LookupResult::Cutoff { score }, e.best),
+                    ScoreKind::AtLeast => alpha = alpha.max(score),
+                    ScoreKind::AtMost => beta = beta.min(score),
                 }
                 if alpha >= beta {
-                    return (LookupResult::Cutoff { score: e.score }, e.best);
+                    return (LookupResult::Cutoff { score }, e.best);
                 }
             }
             e.best
@@ -99,6 +106,7 @@ fn update_table(
     alpha: Score,
     beta: Score,
     depth: u16,
+    ply: u16,
     score: Score,
     best: Option<Move>,
     ctx: &mut MinmaxContext,
@@ -112,7 +120,7 @@ fn update_table(
     };
     let table_value = TableValue {
         depth,
-        score,
+        score: score.sub_ply(ply),
         score_kind,
         best,
     };
@@ -157,11 +165,12 @@ pub fn eval_minmax_pv_split(
     alpha: Score,
     beta: Score,
     depth: u16,
+    ply: u16,
     ctx: &mut MinmaxContext,
     argmax: Option<&RwLock<MinmaxResult>>,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
-        return Ok(eval_quiescent(gs, Score::MIN, Score::MAX, ctx)?);
+        return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
     }
     if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
@@ -190,7 +199,7 @@ pub fn eval_minmax_pv_split(
     }
 
     // Lookup in the table
-    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ctx) {
+    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ply, ctx) {
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
         (LookupResult::Cutoff { score }, best_move) => {
             compare_update_argmax(score, best_move);
@@ -207,7 +216,7 @@ pub fn eval_minmax_pv_split(
         // Search the first branch first, passing the parallel flag
         // This method is called PV-splitting
         let mut best = mv;
-        let mut score = -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, ctx, None)?;
+        let mut score = -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, ply + 1, ctx, None)?;
         compare_update_argmax(score, Some(mv));
         if score >= beta {
             // Cutoff (no need to update the move predictor because we don't use it here)
@@ -233,7 +242,7 @@ pub fn eval_minmax_pv_split(
                         history: ctx.history.clone(),
                     };
                     let (lo, hi) = (-alpha.max(score)).minimal_window();
-                    let temp = -eval_minmax(&next, lo, hi, depth - 1, &mut ctx)?;
+                    let temp = -eval_minmax(&next, lo, hi, depth - 1, ply + 1, &mut ctx)?;
 
                     // If the branch beats the current score, we might need to re-explore
                     score = shared_score.load();
@@ -242,7 +251,7 @@ pub fn eval_minmax_pv_split(
                     }
                     if temp > score {
                         score = if temp > alpha && temp < beta {
-                            -eval_minmax(&next, -beta, -temp, depth - 1, &mut ctx)?
+                            -eval_minmax(&next, -beta, -temp, depth - 1, ply + 1, &mut ctx)?
                         } else {
                             temp
                         };
@@ -263,8 +272,8 @@ pub fn eval_minmax_pv_split(
     } else {
         // No branches to explore
         if gs.is_check() {
-            compare_update_argmax(Score::MIN, None);
-            (Score::MIN, None) // Checkmate
+            compare_update_argmax(Score::LOSS.add_ply(ply), None);
+            (Score::LOSS.add_ply(ply), None) // Checkmate
         } else {
             compare_update_argmax(Score::ZERO, None);
             (Score::ZERO, None) // Stalemate
@@ -273,7 +282,7 @@ pub fn eval_minmax_pv_split(
     ctx.history.pop();
 
     // Store the result in the table
-    update_table(key, alpha, beta, depth, score, best, ctx);
+    update_table(key, alpha, beta, depth, ply, score, best, ctx);
     Ok(score)
 }
 
@@ -283,6 +292,7 @@ fn eval_minmax(
     alpha: Score,
     beta: Score,
     depth: u16,
+    ply: u16,
     ctx: &mut MinmaxContext,
 ) -> Result<Score, SearchInterrupted> {
     if depth == 0 {
@@ -299,7 +309,7 @@ fn eval_minmax(
     }
 
     // Lookup in the table
-    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ctx) {
+    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ply, ctx) {
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
         (LookupResult::Cutoff { score }, _) => return Ok(score),
     };
@@ -312,7 +322,7 @@ fn eval_minmax(
     {
         // The first branch is explored normally
         let mut best = mv;
-        let mut score = -eval_minmax(&next, -beta, -alpha, depth - 1, ctx)?;
+        let mut score = -eval_minmax(&next, -beta, -alpha, depth - 1, ply + 1, ctx)?;
         if score >= beta {
             ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth); // Cutoff
         } else {
@@ -320,13 +330,13 @@ fn eval_minmax(
             for Branch { mv, next } in rest.get_or_generate(&ctx.move_predictor, depth) {
                 // Explore with minimal bounds to test if it can beat the current score
                 let (lo, hi) = (-alpha.max(score)).minimal_window();
-                let temp = -eval_minmax(&next, lo, hi, depth - 1, ctx)?;
+                let temp = -eval_minmax(&next, lo, hi, depth - 1, ply + 1, ctx)?;
 
                 // If the branch beats the current score, we might need to re-explore
                 if temp > score {
                     best = mv;
                     score = if temp > alpha && temp < beta {
-                        -eval_minmax(&next, -beta, -temp, depth - 1, ctx)?
+                        -eval_minmax(&next, -beta, -temp, depth - 1, ply + 1, ctx)?
                     } else {
                         temp
                     };
@@ -341,7 +351,7 @@ fn eval_minmax(
     } else {
         // No branches to explore
         if gs.is_check() {
-            (Score::MIN, None) // Checkmate
+            (Score::LOSS.add_ply(ply), None) // Checkmate
         } else {
             (Score::ZERO, None) // Stalemate
         }
@@ -349,7 +359,7 @@ fn eval_minmax(
     ctx.history.pop();
 
     // Store the result in the table
-    update_table(key, alpha, beta, depth, score, best, ctx);
+    update_table(key, alpha, beta, depth, ply, score, best, ctx);
     Ok(score)
 }
 

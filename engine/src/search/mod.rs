@@ -19,6 +19,8 @@ use shared_table::TableValue;
 
 use crate::{GameState, IllegalMoveError, Move};
 
+pub use evaluate::ScoreInfo;
+
 pub mod settings {
     use super::*;
 
@@ -57,15 +59,6 @@ pub struct SearchStatus {
     pub elapsed: time::Duration,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ScoreInfo {
-    Normal(i16),
-    /// Position is a win in the specified number of moves
-    Win(u16),
-    /// Position is a loss in the specified number of moves
-    Loose(u16),
-}
-
 struct SearchInterrupted;
 
 impl Search {
@@ -95,7 +88,7 @@ impl Search {
             let finish = Arc::clone(&finish);
             thread::spawn(move || {
                 // Iterative deepening
-                for depth in 1..=30 {
+                for depth in 8..=30 {
                     let mut ctx = MinmaxContext {
                         stop: &stop,
                         table: &shared_table::get(),
@@ -106,9 +99,10 @@ impl Search {
                     let final_score = thread_pool::get().install(|| {
                         minmax::eval_minmax_pv_split(
                             &gs,
-                            Score::MIN,
-                            Score::MAX,
+                            Score::LOSS,
+                            Score::WIN,
                             depth,
+                            0,
                             &mut ctx,
                             Some(&result),
                         )
@@ -117,9 +111,11 @@ impl Search {
                     let Ok(final_score) = final_score else {
                         break; // Search has been interrupted
                     };
-                    if final_score == Score::MAX || final_score == Score::MIN {
-                        break; // Stop deepening when a checkmate is found
-                    }
+                    match final_score.info() {
+                        // Stop deepening when a checkmate in a minimal number of moves is found
+                        ScoreInfo::Win(ply) | ScoreInfo::Loss(ply) if ply <= depth => break,
+                        _ => {}
+                    };
                     if depth == 1 && result.read().unwrap().best.is_none() {
                         break; // Current position is a dead end
                     }
@@ -172,11 +168,7 @@ impl Search {
         SearchStatus {
             thinking,
             depth: result.depth,
-            score: match result.score {
-                Score::MAX => ScoreInfo::Win(result.depth / 2),
-                Score::MIN => ScoreInfo::Loose(result.depth / 2),
-                Score(x) => ScoreInfo::Normal(x),
-            },
+            score: result.score.info(),
             pv,
             stats,
             elapsed,

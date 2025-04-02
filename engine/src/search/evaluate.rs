@@ -18,15 +18,62 @@ pub struct Score(pub(crate) i16);
 #[repr(transparent)]
 pub struct AtomicScore(AtomicI16);
 
+#[derive(Debug, Clone, Copy)]
+pub enum ScoreInfo {
+    Normal(i16),
+    /// Position is a win in the specified number of halfmoves
+    Win(u16),
+    /// Position is a loss in the specified number of halfmoves
+    Loss(u16),
+}
+
 impl Score {
     pub const ZERO: Score = Score(0);
-    pub const MAX: Score = Score(i16::MAX);
-    pub const MIN: Score = Score(-i16::MAX);
+    pub const WIN: Score = Score(i16::MAX);
+    pub const LOSS: Score = Score(-i16::MAX);
     pub const NEG_INF: Score = Score(i16::MIN);
+
+    /// Add the specified number of plies to the score, such that:
+    /// - Wins with a lower number of plies are favored
+    /// - Losses with a higher number of plies are favored
+    /// Other scores are not affected
+    pub fn add_ply(&self, ply: u16) -> Score {
+        if self.0 > i16::MAX - 200 {
+            Score(self.0 - ply as i16)
+        } else if self.0 < -i16::MAX + 200 {
+            Score(self.0 + ply as i16)
+        } else {
+            *self
+        }
+    }
+
+    /// Opposite of add_ply, must be used before storing a score in the transposition
+    /// table to remove the score's dependency on the ply number.
+    pub fn sub_ply(&self, ply: u16) -> Score {
+        debug_assert!(self.0 <= i16::MAX - ply as i16);
+        debug_assert!(self.0 >= -i16::MAX + ply as i16);
+        if self.0 > i16::MAX - 200 {
+            Score(self.0 + ply as i16)
+        } else if self.0 < -i16::MAX + 200 {
+            Score(self.0 - ply as i16)
+        } else {
+            *self
+        }
+    }
+
+    pub fn info(&self) -> ScoreInfo {
+        if self.0 > i16::MAX - 200 {
+            ScoreInfo::Win((i16::MAX - self.0) as u16)
+        } else if self.0 < -i16::MAX + 200 {
+            ScoreInfo::Loss((i16::MAX + self.0) as u16)
+        } else {
+            ScoreInfo::Normal(self.0)
+        }
+    }
 
     /// Create a minimal window of (score-1, score)
     pub fn minimal_window(&self) -> (Score, Score) {
-        assert!(*self != Self::NEG_INF);
+        debug_assert!(*self != Self::NEG_INF);
         let alpha = Score(self.0 - 1);
         let beta = *self;
         (alpha, beta)
