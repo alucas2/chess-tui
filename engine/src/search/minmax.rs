@@ -16,6 +16,11 @@ use super::{
     SearchInterrupted,
 };
 
+/// Opaque depth token
+/// TODO: allow non-integer values
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Depth(u16);
+
 pub struct MinmaxContext<'a> {
     /// Shared flag that is set when the search must stop
     pub stop: &'a AtomicBool,
@@ -41,15 +46,16 @@ pub struct MinmaxStatistics {
     pub table_rewrites: u64,
 }
 
+/// Result of the minmax search at the root node
+type Argmax = RwLock<Option<MinmaxResult>>;
+
 #[derive(Clone, Copy)]
 pub struct MinmaxResult {
     /// Depth of the current evaluation
-    pub depth: u16,
+    pub depth: Depth,
     /// Current evaluation
     pub score: Score,
-    /// Best move so far. None can mean multiple things:
-    /// - it's too early in the search and no move have been examined yet
-    /// - the current position is a dead end so there is no possible move
+    /// Best move found
     pub best: Option<Move>,
 }
 
@@ -70,7 +76,7 @@ fn lookup_table(
     key: &GameStateKeyWithHash,
     mut alpha: Score,
     mut beta: Score,
-    desired_depth: u16,
+    desired_depth: Depth,
     ply: u16,
     ctx: &mut MinmaxContext,
 ) -> (LookupResult, Option<Move>) {
@@ -105,7 +111,7 @@ fn update_table(
     key: GameStateKeyWithHash,
     alpha: Score,
     beta: Score,
-    depth: u16,
+    depth: Depth,
     ply: u16,
     score: Score,
     best: Option<Move>,
@@ -159,42 +165,39 @@ fn is_draw(
     false
 }
 
+/// Report a potential score and best move
+fn update_argmax(argmax: &Argmax, new_score: Score, new_best: Option<Move>, new_depth: Depth) {
+    let mut argmax = argmax.write().unwrap();
+    if argmax.is_none_or(|argmax| new_depth > argmax.depth || new_score > argmax.score) {
+        *argmax = Some(MinmaxResult {
+            depth: new_depth,
+            score: new_score,
+            best: new_best,
+        })
+    }
+}
+
 /// Evaluate a position with a parallel minmax using "principal variation split"
 pub fn eval_minmax_pv_split(
     gs: &GameState,
     alpha: Score,
     beta: Score,
-    depth: u16,
+    depth: Depth,
     ply: u16,
     ctx: &mut MinmaxContext,
-    argmax: Option<&RwLock<MinmaxResult>>,
+    argmax: Option<&Argmax>,
 ) -> Result<Score, SearchInterrupted> {
-    if depth == 0 {
+    let Some(depth) = depth.minus_one() else {
         return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
-    }
+    };
     if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
 
-    // Call this closure to report a potential score and best move.
-    // This is only needed for the root node.
-    let compare_update_argmax = |new_score, new_best| {
-        if let Some(argmax) = argmax {
-            let mut argmax = argmax.write().unwrap();
-            if depth > argmax.depth || new_score > argmax.score {
-                *argmax = MinmaxResult {
-                    depth,
-                    score: new_score,
-                    best: new_best,
-                };
-            }
-        }
-    };
-
     // Test for a draw position
     let key = gs.key().hash();
     if is_draw(&key, gs.fiftymove_count, &ctx.history) {
-        compare_update_argmax(Score::ZERO, None);
+        argmax.map(|a| update_argmax(a, Score::ZERO, None, depth));
         return Ok(Score::ZERO);
     }
 
@@ -202,7 +205,7 @@ pub fn eval_minmax_pv_split(
     let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ply, ctx) {
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
         (LookupResult::Cutoff { score }, best_move) => {
-            compare_update_argmax(score, best_move);
+            argmax.map(|a| update_argmax(a, score, best_move, depth));
             return Ok(score);
         }
     };
@@ -211,13 +214,13 @@ pub fn eval_minmax_pv_split(
     ctx.statistics.expanded_nodes += 1;
     ctx.history.push(key);
     let (score, best) = if let Some((Branch { mv, next }, rest)) =
-        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, depth)
+        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
     {
         // Search the first branch first, passing the parallel flag
         // This method is called PV-splitting
         let mut best = mv;
-        let mut score = -eval_minmax_pv_split(&next, -beta, -alpha, depth - 1, ply + 1, ctx, None)?;
-        compare_update_argmax(score, Some(mv));
+        let mut score = -eval_minmax_pv_split(&next, -beta, -alpha, depth, ply + 1, ctx, None)?;
+        argmax.map(|a| update_argmax(a, score, Some(mv), depth));
         if score >= beta {
             // Cutoff (no need to update the move predictor because we don't use it here)
         } else {
@@ -225,7 +228,7 @@ pub fn eval_minmax_pv_split(
             let shared_score = AtomicScore::new(score);
             let shared_score_and_best = Mutex::new((score, best));
             let shared_stat = Mutex::new(&mut ctx.statistics);
-            rest.get_or_generate(&ctx.move_predictor, depth)
+            rest.get_or_generate(&ctx.move_predictor, ply)
                 .par_bridge()
                 .try_for_each(|Branch { mv, next }| {
                     let mut score = shared_score.load();
@@ -237,12 +240,12 @@ pub fn eval_minmax_pv_split(
                     let mut ctx = MinmaxContext {
                         stop: ctx.stop,
                         table: ctx.table,
-                        move_predictor: MovePredictor::new(depth),
+                        move_predictor: MovePredictor::new(),
                         statistics: MinmaxStatistics::default(),
                         history: ctx.history.clone(),
                     };
                     let (lo, hi) = (-alpha.max(score)).minimal_window();
-                    let temp = -eval_minmax(&next, lo, hi, depth - 1, ply + 1, &mut ctx)?;
+                    let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, &mut ctx)?;
 
                     // If the branch beats the current score, we might need to re-explore
                     score = shared_score.load();
@@ -251,7 +254,7 @@ pub fn eval_minmax_pv_split(
                     }
                     if temp > score {
                         score = if temp > alpha && temp < beta {
-                            -eval_minmax(&next, -beta, -temp, depth - 1, ply + 1, &mut ctx)?
+                            -eval_minmax(&next, -beta, -temp, depth, ply + 1, &mut ctx)?
                         } else {
                             temp
                         };
@@ -260,7 +263,7 @@ pub fn eval_minmax_pv_split(
                         if score > score_and_best.0 {
                             score_and_best.0 = score;
                             score_and_best.1 = mv;
-                            compare_update_argmax(score, Some(mv));
+                            argmax.map(|a| update_argmax(a, score, Some(mv), depth));
                         }
                     }
                     shared_stat.lock().unwrap().add(&ctx.statistics);
@@ -272,10 +275,10 @@ pub fn eval_minmax_pv_split(
     } else {
         // No branches to explore
         if gs.is_check() {
-            compare_update_argmax(Score::LOSS.add_ply(ply), None);
+            argmax.map(|a| update_argmax(a, Score::LOSS.add_ply(ply), None, depth));
             (Score::LOSS.add_ply(ply), None) // Checkmate
         } else {
-            compare_update_argmax(Score::ZERO, None);
+            argmax.map(|a| update_argmax(a, Score::ZERO, None, depth));
             (Score::ZERO, None) // Stalemate
         }
     };
@@ -291,13 +294,13 @@ fn eval_minmax(
     gs: &GameState,
     alpha: Score,
     beta: Score,
-    depth: u16,
+    depth: Depth,
     ply: u16,
     ctx: &mut MinmaxContext,
 ) -> Result<Score, SearchInterrupted> {
-    if depth == 0 {
+    let Some(depth) = depth.minus_one() else {
         return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
-    }
+    };
     if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
@@ -318,30 +321,30 @@ fn eval_minmax(
     ctx.statistics.expanded_nodes += 1;
     ctx.history.push(key);
     let (score, best) = if let Some((Branch { mv, next }, rest)) =
-        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, depth)
+        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
     {
         // The first branch is explored normally
         let mut best = mv;
-        let mut score = -eval_minmax(&next, -beta, -alpha, depth - 1, ply + 1, ctx)?;
+        let mut score = -eval_minmax(&next, -beta, -alpha, depth, ply + 1, ctx)?;
         if score >= beta {
-            ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth); // Cutoff
+            ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
         } else {
             // The remaining branches are explored with a "principal variation search"
-            for Branch { mv, next } in rest.get_or_generate(&ctx.move_predictor, depth) {
+            for Branch { mv, next } in rest.get_or_generate(&ctx.move_predictor, ply) {
                 // Explore with minimal bounds to test if it can beat the current score
                 let (lo, hi) = (-alpha.max(score)).minimal_window();
-                let temp = -eval_minmax(&next, lo, hi, depth - 1, ply + 1, ctx)?;
+                let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
 
                 // If the branch beats the current score, we might need to re-explore
                 if temp > score {
                     best = mv;
                     score = if temp > alpha && temp < beta {
-                        -eval_minmax(&next, -beta, -temp, depth - 1, ply + 1, ctx)?
+                        -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?
                     } else {
                         temp
                     };
                     if score >= beta {
-                        ctx.move_predictor.apply_cutoff_bonus(gs, mv, depth); // Cutoff
+                        ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
                         break;
                     }
                 }
@@ -444,13 +447,23 @@ impl MinmaxStatistics {
     }
 }
 
-impl Default for MinmaxResult {
-    fn default() -> Self {
-        MinmaxResult {
-            depth: 1,
-            score: Score::NEG_INF,
-            best: None,
+impl From<u16> for Depth {
+    fn from(value: u16) -> Self {
+        Depth(value)
+    }
+}
+
+impl Depth {
+    fn minus_one(self) -> Option<Depth> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(Depth(self.0 - 1))
         }
+    }
+
+    pub fn integer(self) -> u16 {
+        self.0
     }
 }
 
@@ -478,7 +491,7 @@ mod branch_iterator {
         gs: &'a GameState,
         table_move: Option<Move>,
         move_predictor: &MovePredictor,
-        depth: u16,
+        ply: u16,
     ) -> Option<(Branch, RestLazy<'a>)> {
         match table_move {
             Some(mv) => {
@@ -493,7 +506,7 @@ mod branch_iterator {
                 ))
             }
             None => {
-                let mut rest = generate_moves_with_predictor(gs, move_predictor, depth);
+                let mut rest = generate_moves_with_predictor(gs, move_predictor, ply);
                 loop {
                     let mv = take_highest_move(&mut rest)?;
                     if let Ok(next) = gs.make_move(mv) {
@@ -512,13 +525,13 @@ mod branch_iterator {
     }
 
     impl<'a> RestLazy<'a> {
-        pub fn get_or_generate(self, move_predictor: &MovePredictor, depth: u16) -> Rest<'a> {
+        pub fn get_or_generate(self, move_predictor: &MovePredictor, ply: u16) -> Rest<'a> {
             Rest {
                 gs: self.gs,
                 exclude: self.exclude,
                 rest: match self.rest {
                     Some(rest) => rest,
-                    None => generate_moves_with_predictor(self.gs, move_predictor, depth),
+                    None => generate_moves_with_predictor(self.gs, move_predictor, ply),
                 },
             }
         }

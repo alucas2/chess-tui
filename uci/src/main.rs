@@ -171,54 +171,58 @@ impl SearchThread {
                         deadline,
                         ref mut stop,
                     } => {
-                        let status = search.status();
-                        *stop |= Instant::now() > deadline;
-                        *stop |= !status.thinking;
+                        // If the search has not find a result yet, we just wait.
+                        if let Some(result) = search.result() {
+                            let status = search.status();
 
-                        // Print some info
-                        let score = match status.score {
-                            ScoreInfo::Normal(x) => format!("score cp {x}"),
-                            ScoreInfo::Win(x) => format!("score mate {}", x / 2 + 1),
-                            ScoreInfo::Loss(x) => format!("score mate -{}", x / 2),
-                        };
-                        let pv = if status.pv.is_empty() {
-                            "".to_string()
-                        } else {
-                            let mut string = String::new();
-                            let mut current = *current;
-                            for mv in &status.pv {
-                                string = format!("{string} {}", mv.info(&current));
-                                current = current.make_move(*mv).expect("PV move should be legal");
-                            }
-                            format!("pv {string}")
-                        };
-                        println!(
-                            "info depth {} nodes {} {pv} {score}",
-                            status.depth,
-                            status.stats.expanded_nodes + status.stats.expanded_nodes_quiescent
-                        );
+                            *stop |= Instant::now() > deadline; // We are past the deadline
+                            *stop |= !status.thinking; // The search stopped itself
 
-                        // Stop the search and continue pondering if possible
-                        if *stop {
-                            match status.pv.first() {
-                                Some(best) => {
-                                    println!("bestmove {}", best.info(current));
-                                    state = SearchState::Pondering(
-                                        Search::start(
-                                            *initial,
-                                            moves_from_initial
-                                                .iter()
-                                                .copied()
-                                                .chain(std::iter::once(*best)),
-                                        )
-                                        .expect("Best move should be legal"),
-                                    );
+                            // Print some info
+                            let score = match result.score {
+                                ScoreInfo::Normal(x) => format!("score cp {x}"),
+                                ScoreInfo::Win(x) => format!("score mate {}", x / 2 + 1),
+                                ScoreInfo::Loss(x) => format!("score mate -{}", x / 2),
+                            };
+                            let pv = if result.pv.is_empty() {
+                                "".to_string()
+                            } else {
+                                let mut string = String::new();
+                                let mut current = *current;
+                                for mv in &result.pv {
+                                    string = format!("{string} {}", mv.info(&current));
+                                    current =
+                                        current.make_move(*mv).expect("PV move should be legal");
                                 }
-                                None if !status.thinking => {
-                                    println!("bestmove 0000");
-                                    state = SearchState::Waiting
+                                format!("pv {string}")
+                            };
+                            println!(
+                                "info depth {} nodes {} {pv} {score}",
+                                result.depth,
+                                status.stats.expanded_nodes + status.stats.expanded_nodes_quiescent
+                            );
+
+                            // Stop the search and continue pondering if possible
+                            if *stop {
+                                match result.pv.first() {
+                                    Some(best) => {
+                                        println!("bestmove {}", best.info(current));
+                                        state = SearchState::Pondering(
+                                            Search::start(
+                                                *initial,
+                                                moves_from_initial
+                                                    .iter()
+                                                    .copied()
+                                                    .chain(std::iter::once(*best)),
+                                            )
+                                            .expect("Best move should be legal"),
+                                        );
+                                    }
+                                    None => {
+                                        println!("bestmove 0000");
+                                        state = SearchState::Waiting
+                                    }
                                 }
-                                None => {}
                             }
                         }
                     }

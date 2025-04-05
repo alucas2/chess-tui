@@ -2,7 +2,7 @@ use std::sync::{LazyLock, RwLock, RwLockReadGuard};
 
 use crate::Move;
 
-use super::evaluate::Score;
+use super::{evaluate::Score, minmax::Depth};
 
 pub type Table = crate::transposition_table::Table<(), TableValue>;
 
@@ -10,7 +10,7 @@ pub type Table = crate::transposition_table::Table<(), TableValue>;
 /// Its size should not be excessive to fit within a table entry
 #[derive(Clone, Copy)]
 pub struct TableValue {
-    pub depth: u16,
+    pub depth: Depth,
     pub score: Score,
     pub score_kind: ScoreKind,
     pub best: Option<Move>,

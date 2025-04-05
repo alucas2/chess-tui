@@ -196,19 +196,23 @@ impl Home {
     }
 
     fn draw_ponder_panel(&self, layout: &UiLayout, buf: &mut Buffer) {
-        let Some(result) = self.pending_search.as_ref().map(|s| s.status()) else {
+        let Some(search) = self.pending_search.as_ref() else {
             return;
         };
+        let status = search.status();
+        let result = search.result();
+
+        // Panel bounds
         let mut block = Block::bordered().title(format!("Analysis"));
         let [gauge_area, paragraph_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
                 .areas(block.inner(layout.ponder_panel));
 
-        let seconds = result.elapsed.as_secs_f64();
+        let seconds = status.elapsed.as_secs_f64();
         block = block.title(format!("{:.1} s", seconds));
 
         // Add a cute spinner if the computer is still pondering
-        if result.thinking {
+        if status.thinking {
             let spinner = {
                 use std::sync::OnceLock;
                 use std::time::Instant;
@@ -220,21 +224,24 @@ impl Home {
         }
 
         // Show a gauge with a white and a black part to represent the score
-        let (score_label, mut gauge_ratio) = match result.score {
-            ScoreInfo::Normal(x) => {
-                // Map the i16 score to a percentage using a totally arbitrary formula
-                let r = x as f64 / i16::MAX as f64;
-                let r = (r * 60.0).atan() * std::f64::consts::FRAC_1_PI + 0.5;
-                (x.to_string(), r)
-            }
-            ScoreInfo::Win(x) => (format!("M{x}"), 1.0),
-            ScoreInfo::Loss(x) => (format!("-M{x}"), 0.0),
+        let (score_label, mut gauge_ratio) = match &result {
+            Some(r) => match r.score {
+                ScoreInfo::Normal(x) => {
+                    // Map the i16 score to a percentage using a totally arbitrary formula
+                    let r = x as f64 / i16::MAX as f64;
+                    let r = (r * 60.0).atan() * std::f64::consts::FRAC_1_PI + 0.5;
+                    (x.to_string(), r)
+                }
+                ScoreInfo::Win(x) => (format!("M{x}"), 1.0),
+                ScoreInfo::Loss(x) => (format!("-M{x}"), 0.0),
+            },
+            None => ("???".to_string(), 0.0),
         };
         if self.gamestate.current().side_to_move() == PlayerSide::Black {
             gauge_ratio = 1.0 - gauge_ratio;
         }
         Gauge::default()
-            .label(&score_label)
+            .label(score_label)
             .ratio(gauge_ratio)
             .use_unicode(true)
             .gauge_style(
@@ -245,18 +252,25 @@ impl Home {
             .render(gauge_area, buf);
 
         // Formatting the PV requires to retrace the sequence of gamestates
-        let pv = {
-            let mut string = String::new();
-            let mut gs = *self.gamestate.current();
-            for mv in result.pv {
-                string = format!("{string} {}", moves::human_notation(mv, &gs));
-                gs = gs.make_move(mv).expect("PV move should be legal");
+        let pv = match &result {
+            Some(r) => {
+                let mut string = String::new();
+                let mut gs = *self.gamestate.current();
+                for &mv in &r.pv {
+                    string = format!("{string} {}", moves::human_notation(mv, &gs));
+                    gs = gs.make_move(mv).expect("PV move should be legal");
+                }
+                string
             }
-            string
+            None => "".to_string(),
         };
 
-        let stats = result.stats;
-        let depth = result.depth;
+        let depth = match &result {
+            Some(r) => r.depth.to_string(),
+            None => "?".to_string(),
+        };
+
+        let stats = status.stats;
         let text = format!("Depth: {depth}\nPV:{pv}\n{stats:#?}");
         block.render(layout.ponder_panel, buf);
         Paragraph::new(text).render(paragraph_area, buf);
@@ -301,10 +315,10 @@ impl IState for Home {
             Some(KeyCode::Char('s')) => self.pending_search = None,
             Some(KeyCode::Char('a')) => match &self.pending_search {
                 Some(search) => {
-                    if let Some(best) = search.status().pv.first() {
+                    if let Some(best) = search.result().and_then(|r| r.pv.first().copied()) {
                         let mut available_moves = self.gamestate.available_moves().iter();
                         let mv = available_moves
-                            .find(|mv| mv.inner == *best)
+                            .find(|mv| mv.inner == best)
                             .expect("Search should have found a legal move");
                         self.do_move(*mv);
                     }
@@ -364,7 +378,7 @@ impl IState for Home {
         match &self.pending_search {
             Some(search) => {
                 bottom_bar.push("S", "Stop analysing");
-                if !search.status().pv.is_empty() {
+                if search.has_result() {
                     bottom_bar.push("A", "Auto move")
                 }
             }

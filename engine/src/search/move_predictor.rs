@@ -13,7 +13,7 @@ pub struct MovePredictor {
     history_white: [[u8; 64]; 6],
     /// History of cutoffs from black moves
     history_black: [[u8; 64]; 6],
-    /// Killer moves that caused a cutoff, for each depth
+    /// Killer moves that caused a cutoff, indexed by ply
     killer_moves: Vec<[Option<MoveInfo>; NUM_KILLER_MOVES]>,
 }
 
@@ -55,16 +55,17 @@ fn static_exchange_eval(gs: &GameState, sq: SquareIndex, victim: PieceKind) -> i
 }
 
 impl MovePredictor {
-    pub fn new(max_depth: u16) -> Self {
+    pub fn new() -> Self {
+        const MAX_PLY: usize = 128;
         MovePredictor {
             history_white: [[0; 64]; 6],
             history_black: [[0; 64]; 6],
-            killer_moves: vec![[None; NUM_KILLER_MOVES]; max_depth as usize],
+            killer_moves: vec![[None; NUM_KILLER_MOVES]; MAX_PLY],
         }
     }
 
     /// Make a fast evaluation of a move, with a stateful evaluator for better accuracy.
-    pub fn eval(&self, gs: &GameState, mv: Move, depth: u16) -> i16 {
+    pub fn eval(&self, gs: &GameState, mv: Move, ply: u16) -> i16 {
         let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
@@ -87,7 +88,7 @@ impl MovePredictor {
                 }
             }
             _ => {
-                if let Some(i) = self.killer_moves[depth as usize]
+                if let Some(i) = self.killer_moves[ply as usize]
                     .iter()
                     .position(|k| *k == Some(mvi))
                 {
@@ -115,11 +116,11 @@ impl MovePredictor {
         score
     }
 
-    pub fn apply_cutoff_bonus(&mut self, gs: &GameState, mv: Move, depth: u16) {
+    pub fn apply_cutoff_bonus(&mut self, gs: &GameState, mv: Move, ply: u16) {
         let mv = mv.unwrap();
         if gs.pieces.get(mv.to).is_none() {
             // Store as a killer move
-            let killer_moves = &mut self.killer_moves[depth as usize];
+            let killer_moves = &mut self.killer_moves[ply as usize];
             if !killer_moves[..NUM_KILLER_MOVES - 1].contains(&Some(mv)) {
                 killer_moves.rotate_right(1);
                 killer_moves[0] = Some(mv);

@@ -33,7 +33,7 @@ pub mod settings {
 /// Handle to the search thread
 pub struct Search {
     gs: GameState,
-    result: Arc<RwLock<MinmaxResult>>,
+    result: Arc<RwLock<Option<MinmaxResult>>>,
     stop: Arc<AtomicBool>,
     stats: Arc<RwLock<MinmaxStatistics>>,
     handle: Option<thread::JoinHandle<()>>,
@@ -46,17 +46,20 @@ pub struct Search {
 pub struct SearchStatus {
     /// Indicates if the search thread is still running
     pub thinking: bool,
-    /// Depth of the search that gave the current result
-    pub depth: u16,
-    /// Score assigned to the searched position
-    pub score: ScoreInfo,
-    /// Best move from the search position. Is None if no moves are available
-    /// because the game is lost or if it's too early in the search to know
-    pub pv: Vec<Move>,
     /// Search performance metrics
     pub stats: MinmaxStatistics,
     /// Time elapsed
     pub elapsed: time::Duration,
+}
+
+#[derive(Clone)]
+pub struct SearchResult {
+    /// Depth of the search that gave the current result
+    pub depth: u16,
+    /// Score assigned to the searched position
+    pub score: ScoreInfo,
+    /// Best move and continuation from the search position
+    pub pv: Vec<Move>,
 }
 
 struct SearchInterrupted;
@@ -76,7 +79,7 @@ impl Search {
         }
 
         // Spawn the search thread
-        let result = Arc::new(RwLock::new(MinmaxResult::default()));
+        let result = Arc::new(RwLock::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(RwLock::new(MinmaxStatistics::default()));
         let start = time::Instant::now();
@@ -92,7 +95,7 @@ impl Search {
                     let mut ctx = MinmaxContext {
                         stop: &stop,
                         table: &shared_table::get(),
-                        move_predictor: MovePredictor::new(depth + 1),
+                        move_predictor: MovePredictor::new(),
                         statistics: MinmaxStatistics::default(),
                         history: history.clone(),
                     };
@@ -101,7 +104,7 @@ impl Search {
                             &gs,
                             Score::LOSS,
                             Score::WIN,
-                            depth,
+                            depth.into(),
                             0,
                             &mut ctx,
                             Some(&result),
@@ -116,7 +119,7 @@ impl Search {
                         ScoreInfo::Win(ply) | ScoreInfo::Loss(ply) if ply <= depth => break,
                         _ => {}
                     };
-                    if depth == 1 && result.read().unwrap().best.is_none() {
+                    if result.read().unwrap().is_some_and(|r| r.best.is_none()) {
                         break; // Current position is a dead end
                     }
                 }
@@ -137,12 +140,22 @@ impl Search {
 
     /// Get the status of the search thread
     pub fn status(&self) -> SearchStatus {
-        let result = self.result.read().unwrap().clone();
         let stats = self.stats.read().unwrap().clone();
         let (elapsed, thinking) = match *self.finish.read().unwrap() {
             Some(finish) => (finish - self.start, false),
             None => (self.start.elapsed(), true),
         };
+
+        SearchStatus {
+            thinking,
+            stats,
+            elapsed,
+        }
+    }
+
+    /// Get the result of the search thread. Returns None if it's too early to have a result.
+    pub fn result(&self) -> Option<SearchResult> {
+        let result = self.result.read().unwrap().clone()?;
         let pv = match result.best {
             Some(mut mv) => {
                 let mut gs = self.gs;
@@ -165,14 +178,14 @@ impl Search {
             }
             _ => vec![],
         };
-        SearchStatus {
-            thinking,
-            depth: result.depth,
-            score: result.score.info(),
-            pv,
-            stats,
-            elapsed,
-        }
+        let score = result.score.info();
+        let depth = result.depth.integer() + 1;
+        Some(SearchResult { depth, score, pv })
+    }
+
+    /// Equivalent to `result().is_some()`
+    pub fn has_result(&self) -> bool {
+        self.result.read().unwrap().is_some()
     }
 }
 
