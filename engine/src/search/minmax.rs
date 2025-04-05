@@ -11,7 +11,7 @@ use crate::{GameState, GameStateKeyWithHash, Move};
 
 use super::{
     evaluate::{self, AtomicScore, Score},
-    move_predictor::{self, MovePredictor},
+    move_predictor::{self, MovePredictor, MoveScore},
     shared_table::{ScoreKind, Table, TableValue},
     SearchInterrupted,
 };
@@ -62,12 +62,6 @@ pub struct MinmaxResult {
 enum LookupResult {
     UpdateBounds { alpha: Score, beta: Score },
     Cutoff { score: Score },
-}
-
-struct MoveWithKey {
-    mv: Move,
-    /// Rough evaluation of the move to compare it to other moves
-    key: i16,
 }
 
 /// Lookup a position in the table and take the opportunity to restrict the alpha and beta bounds.
@@ -213,7 +207,7 @@ pub fn eval_minmax_pv_split(
     // Explore the branches
     ctx.statistics.expanded_nodes += 1;
     ctx.history.push(key);
-    let (score, best) = if let Some((Branch { mv, next }, rest)) =
+    let (score, best) = if let Some((Branch { mv, next, .. }, rest)) =
         branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
     {
         // Search the first branch first, passing the parallel flag
@@ -230,31 +224,50 @@ pub fn eval_minmax_pv_split(
             let shared_stat = Mutex::new(&mut ctx.statistics);
             rest.get_or_generate(&ctx.move_predictor, ply)
                 .par_bridge()
-                .try_for_each(|Branch { mv, next }| {
-                    let mut score = shared_score.load();
-                    if score >= beta {
-                        return Ok(()); // Cutoff (first opportunity)
-                    }
-
-                    // Explore with minimal bounds to test if it can beat the current score
-                    let mut ctx = MinmaxContext {
+                .try_for_each(|Branch { mv, next, reduce }| {
+                    // Create a new context just for this branch, because it's on its own thread
+                    let ctx = &mut MinmaxContext {
                         stop: ctx.stop,
                         table: ctx.table,
                         move_predictor: MovePredictor::new(),
                         statistics: MinmaxStatistics::default(),
                         history: ctx.history.clone(),
                     };
-                    let (lo, hi) = (-alpha.max(score)).minimal_window();
-                    let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, &mut ctx)?;
+                    'end: {
+                        let mut score = shared_score.load();
+                        if score >= beta {
+                            break 'end; // Cutoff (first opportunity)
+                        }
 
-                    // If the branch beats the current score, we might need to re-explore
-                    score = shared_score.load();
-                    if score >= beta {
-                        return Ok(()); // Cutoff (second opportunity)
-                    }
-                    if temp > score {
+                        // Minimal window to test if the branch can beat the current score
+                        let (lo, hi) = (-alpha.max(score)).minimal_window();
+
+                        // Explore with minimal bounds and reduced depth
+                        let reduced_depth = depth.reduce(reduce);
+                        if reduced_depth != depth {
+                            let temp = -eval_minmax(&next, lo, hi, reduced_depth, ply + 1, ctx)?;
+                            score = shared_score.load();
+                            if score >= beta {
+                                break 'end; // Cutoff (second opportunity)
+                            }
+                            if temp <= score {
+                                break 'end; // Branch (probably) does not beat the current score
+                            }
+                        }
+
+                        // Explore with minimal bounds
+                        let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
+                        score = shared_score.load();
+                        if score >= beta {
+                            break 'end; // Cutoff (third opportunity)
+                        }
+                        if temp <= score {
+                            break 'end; // Branch does not beat the current score
+                        }
+
                         score = if temp > alpha && temp < beta {
-                            -eval_minmax(&next, -beta, -temp, depth, ply + 1, &mut ctx)?
+                            // Re-explore with normal bounds to get the true score
+                            -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?
                         } else {
                             temp
                         };
@@ -266,6 +279,7 @@ pub fn eval_minmax_pv_split(
                             argmax.map(|a| update_argmax(a, score, Some(mv), depth));
                         }
                     }
+                    // Add the statistics of this branch to the main statistics
                     shared_stat.lock().unwrap().add(&ctx.statistics);
                     Ok(())
                 })?;
@@ -320,7 +334,7 @@ fn eval_minmax(
     // Explore the branches
     ctx.statistics.expanded_nodes += 1;
     ctx.history.push(key);
-    let (score, best) = if let Some((Branch { mv, next }, rest)) =
+    let (score, best) = if let Some((Branch { mv, next, .. }, rest)) =
         branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
     {
         // The first branch is explored normally
@@ -330,23 +344,35 @@ fn eval_minmax(
             ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
         } else {
             // The remaining branches are explored with a "principal variation search"
-            for Branch { mv, next } in rest.get_or_generate(&ctx.move_predictor, ply) {
-                // Explore with minimal bounds to test if it can beat the current score
+            for Branch { mv, next, reduce } in rest.get_or_generate(&ctx.move_predictor, ply) {
+                // Minimal window to test if the branch can beat the current score
                 let (lo, hi) = (-alpha.max(score)).minimal_window();
-                let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
 
-                // If the branch beats the current score, we might need to re-explore
-                if temp > score {
-                    best = mv;
-                    score = if temp > alpha && temp < beta {
-                        -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?
-                    } else {
-                        temp
-                    };
-                    if score >= beta {
-                        ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
-                        break;
+                // Explore with minimal bounds and reduced depth
+                let reduced_depth = depth.reduce(reduce);
+                if reduced_depth != depth {
+                    let temp = -eval_minmax(&next, lo, hi, reduced_depth, ply + 1, ctx)?;
+                    if temp <= score {
+                        continue; // Branch (probably) does not beat the current score
                     }
+                }
+
+                // Explore with minimal bounds
+                let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
+                if temp <= score {
+                    continue; // Branch does not beat the current score
+                }
+
+                best = mv;
+                score = if temp > alpha && temp < beta {
+                    // Re-explore with normal bounds to get the true score
+                    -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?
+                } else {
+                    temp
+                };
+                if score >= beta {
+                    ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
+                    break;
                 }
             }
         }
@@ -390,7 +416,7 @@ fn eval_quiescent(
     let mut moves = generate_non_quiet_moves(gs);
 
     // Pop and explore the branches, starting from the most promising
-    while let Some(mv) = take_highest_move(&mut moves) {
+    while let Some(MoveWithKey { mv, .. }) = take_highest_move(&mut moves) {
         let Ok(next_gs) = gs.make_move_quiescent(mv) else {
             continue; // Illegal move
         };
@@ -406,11 +432,25 @@ fn eval_quiescent(
     Ok(score)
 }
 
+struct MoveWithKey {
+    mv: Move,
+    key: MoveScore,
+}
+
+impl From<Move> for MoveWithKey {
+    fn from(mv: Move) -> Self {
+        MoveWithKey {
+            mv,
+            key: MoveScore::default(),
+        }
+    }
+}
+
 type MoveList = SmallVec<[MoveWithKey; 64]>;
 
 fn generate_moves_with_predictor(gs: &GameState, mp: &MovePredictor, depth: u16) -> MoveList {
     let mut moves = SmallVec::<[_; 64]>::new();
-    gs.pseudo_legal_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
+    gs.pseudo_legal_moves(|mv| moves.push(mv.into()));
     for MoveWithKey { mv, key } in moves.iter_mut() {
         *key = mp.eval(gs, *mv, depth);
     }
@@ -421,7 +461,7 @@ type NonQuietMoveList = SmallVec<[MoveWithKey; 16]>;
 
 fn generate_non_quiet_moves(gs: &GameState) -> NonQuietMoveList {
     let mut moves = SmallVec::new();
-    gs.pseudo_legal_non_quiet_moves(|mv| moves.push(MoveWithKey { mv, key: 0 }));
+    gs.pseudo_legal_non_quiet_moves(|mv| moves.push(mv.into()));
     for MoveWithKey { mv, key } in moves.iter_mut() {
         *key = move_predictor::eval(gs, *mv);
     }
@@ -430,9 +470,9 @@ fn generate_non_quiet_moves(gs: &GameState) -> NonQuietMoveList {
 
 fn take_highest_move<A: smallvec::Array<Item = MoveWithKey>>(
     moves: &mut SmallVec<A>,
-) -> Option<Move> {
+) -> Option<MoveWithKey> {
     let (index, _) = moves.iter().enumerate().max_by_key(|(_, mv)| mv.key)?;
-    Some(moves.swap_remove(index).mv)
+    Some(moves.swap_remove(index))
 }
 
 impl MinmaxStatistics {
@@ -455,11 +495,15 @@ impl From<u16> for Depth {
 
 impl Depth {
     fn minus_one(self) -> Option<Depth> {
-        if self.0 == 0 {
-            None
-        } else {
+        if self.0 >= 1 {
             Some(Depth(self.0 - 1))
+        } else {
+            None
         }
+    }
+
+    fn reduce(self, amount: Depth) -> Depth {
+        Depth(self.0.saturating_sub(amount.0))
     }
 
     pub fn integer(self) -> u16 {
@@ -471,8 +515,12 @@ mod branch_iterator {
     use super::*;
 
     pub struct Branch {
+        /// Move that led to this branch
         pub mv: Move,
+        /// State that results from the move
         pub next: GameState,
+        /// Recommended amount of depth reduction to search this branch
+        pub reduce: Depth,
     }
 
     pub struct RestLazy<'a> {
@@ -497,7 +545,11 @@ mod branch_iterator {
             Some(mv) => {
                 let next = gs.make_move(mv).expect("Table move should be legal");
                 Some((
-                    Branch { mv, next },
+                    Branch {
+                        mv,
+                        next,
+                        reduce: 0.into(),
+                    },
                     RestLazy {
                         gs,
                         exclude: table_move,
@@ -508,10 +560,14 @@ mod branch_iterator {
             None => {
                 let mut rest = generate_moves_with_predictor(gs, move_predictor, ply);
                 loop {
-                    let mv = take_highest_move(&mut rest)?;
+                    let MoveWithKey { mv, key } = take_highest_move(&mut rest)?;
                     if let Ok(next) = gs.make_move(mv) {
                         break Some((
-                            Branch { mv, next },
+                            Branch {
+                                mv,
+                                next,
+                                reduce: key.depth_reduction(),
+                            },
                             RestLazy {
                                 gs,
                                 exclude: None,
@@ -542,12 +598,16 @@ mod branch_iterator {
 
         fn next(&mut self) -> Option<Branch> {
             loop {
-                let mv = take_highest_move(&mut self.rest)?;
+                let MoveWithKey { mv, key } = take_highest_move(&mut self.rest)?;
                 if Some(mv) == self.exclude {
                     continue;
                 }
                 if let Ok(next) = self.gs.make_move(mv) {
-                    break Some(Branch { mv, next });
+                    break Some(Branch {
+                        mv,
+                        next,
+                        reduce: key.depth_reduction(),
+                    });
                 }
             }
         }

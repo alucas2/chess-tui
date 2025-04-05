@@ -3,9 +3,25 @@ use crate::{
     SquareIter,
 };
 
-use super::evaluate;
+use super::{evaluate, minmax::Depth};
 
 const NUM_KILLER_MOVES: usize = 3;
+
+/// Evaluation of a move, used to order promising moves
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MoveScore(i16);
+
+impl MoveScore {
+    /// Get the recommended amount of reduction for a move
+    pub fn depth_reduction(&self) -> Depth {
+        match self.0 {
+            256.. => 0,
+            0..256 => 1,
+            ..0 => 2,
+        }
+        .into()
+    }
+}
 
 #[derive(Debug)]
 pub struct MovePredictor {
@@ -20,7 +36,7 @@ pub struct MovePredictor {
 /// Make a fast evaluation of a move.
 /// NOTE: The "score" returned by this function has nothing to do with
 /// the "score" of a gamestate, the latter being represented by the `Score` type.
-pub fn eval(gs: &GameState, mv: Move) -> i16 {
+pub fn eval(gs: &GameState, mv: Move) -> MoveScore {
     let mvi = mv.unwrap();
     const CAPTURE_MULT: i16 = 20;
     match gs.pieces.get(mvi.to) {
@@ -28,11 +44,13 @@ pub fn eval(gs: &GameState, mv: Move) -> i16 {
             // Static exchange evaluation for captures
             // Ranges from approx. -18000 to +18000
             let next_gs = gs.make_move_exchange_eval(mv);
-            CAPTURE_MULT
-                * (evaluate::piece_value(victim)
-                    - static_exchange_eval(&next_gs, mvi.to.mirror(), mvi.kind))
+            MoveScore(
+                CAPTURE_MULT
+                    * (evaluate::piece_value(victim)
+                        - static_exchange_eval(&next_gs, mvi.to.mirror(), mvi.kind)),
+            )
         }
-        _ => 0,
+        _ => MoveScore(0),
     }
 }
 
@@ -65,7 +83,7 @@ impl MovePredictor {
     }
 
     /// Make a fast evaluation of a move, with a stateful evaluator for better accuracy.
-    pub fn eval(&self, gs: &GameState, mv: Move, ply: u16) -> i16 {
+    pub fn eval(&self, gs: &GameState, mv: Move, ply: u16) -> MoveScore {
         let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
@@ -113,7 +131,7 @@ impl MovePredictor {
                 score += CHECK_BONUS;
             }
         }
-        score
+        MoveScore(score)
     }
 
     pub fn apply_cutoff_bonus(&mut self, gs: &GameState, mv: Move, ply: u16) {
