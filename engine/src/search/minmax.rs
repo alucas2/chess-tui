@@ -82,7 +82,7 @@ fn lookup_table(
     let table_move = match ctx.table.lookup(key) {
         Some(e) => {
             ctx.statistics.table_hits += 1;
-            if e.depth == desired_depth {
+            if e.depth >= desired_depth {
                 let score = e.score.add_ply(ply);
                 match e.score_kind {
                     ScoreKind::Exact => return (LookupResult::Cutoff { score }, e.best),
