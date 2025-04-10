@@ -3,27 +3,28 @@ use crate::{
     SquareIter,
 };
 
-use super::{evaluate, minmax::Depth};
+use super::{
+    evaluate,
+    minmax::{Depth, MAX_PLY},
+};
 
 const NUM_KILLER_MOVES: usize = 3;
 
-/// Evaluation of a move, used to order promising moves
+/// Evaluation of a move, used to order promising moves.
+/// Not to be confused with the evaluation of a position!
 #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MoveScore(i16);
 
-impl MoveScore {
-    /// Get the recommended amount of reduction for a move
-    pub fn depth_reduction(&self) -> Depth {
-        match self.0 {
-            256.. => 0,
-            0..256 => 1,
-            ..0 => 2,
-        }
-        .into()
-    }
+#[derive(Default, Clone, Copy)]
+pub struct MovePrediction {
+    /// Evaluation of the move
+    pub score: MoveScore,
+    /// Recommended depth reduction
+    pub reduce: Depth,
+    /// Recommended depth extension
+    pub extend: Depth,
 }
 
-#[derive(Debug)]
 pub struct MovePredictor {
     /// History of cutoffs from white moves
     history_white: [[u8; 64]; 6],
@@ -34,8 +35,6 @@ pub struct MovePredictor {
 }
 
 /// Make a fast evaluation of a move.
-/// NOTE: The "score" returned by this function has nothing to do with
-/// the "score" of a gamestate, the latter being represented by the `Score` type.
 pub fn eval(gs: &GameState, mv: Move) -> MoveScore {
     let mvi = mv.unwrap();
     const CAPTURE_MULT: i16 = 20;
@@ -74,23 +73,25 @@ fn static_exchange_eval(gs: &GameState, sq: SquareIndex, victim: PieceKind) -> i
 
 impl MovePredictor {
     pub fn new() -> Self {
-        const MAX_PLY: usize = 128;
         MovePredictor {
             history_white: [[0; 64]; 6],
             history_black: [[0; 64]; 6],
-            killer_moves: vec![[None; NUM_KILLER_MOVES]; MAX_PLY],
+            killer_moves: vec![[None; NUM_KILLER_MOVES]; MAX_PLY as usize],
         }
     }
 
     /// Make a fast evaluation of a move, with a stateful evaluator for better accuracy.
-    pub fn eval(&self, gs: &GameState, mv: Move, ply: u16) -> MoveScore {
+    pub fn eval(&self, gs: &GameState, mv: Move, ply: u16) -> MovePrediction {
         let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
         const CHECK_BONUS: i16 = 14000;
 
         let next_gs = gs.make_move_exchange_eval(mv);
-        let mut score = match gs.pieces.get(mvi.to) {
+        let mut extension = 0;
+        let mut reduction = 0;
+        let mut score;
+        match gs.pieces.get(mvi.to) {
             Some((_, victim))
                 if !matches!(mvi.flag, MoveFlag::CastleEast | MoveFlag::CastleWest) =>
             {
@@ -98,11 +99,13 @@ impl MovePredictor {
                 // Ranges from approx. -18000 to +18000
                 let capture_gain = evaluate::piece_value(victim)
                     - static_exchange_eval(&next_gs, mvi.to.mirror(), mvi.kind);
-                match capture_gain {
+                if capture_gain >= 0 {
                     // Place winning and neutral captures above killer moves
-                    0.. => CAPTURE_MULT * capture_gain + KILLER_BONUS + 1,
+                    score = CAPTURE_MULT * capture_gain + KILLER_BONUS + 1;
+                } else {
                     // Place loosing captures after everything
-                    ..=-1 => CAPTURE_MULT * capture_gain,
+                    score = CAPTURE_MULT * capture_gain;
+                    reduction = 2;
                 }
             }
             _ => {
@@ -112,7 +115,7 @@ impl MovePredictor {
                 {
                     // Bonus for killer moves
                     // Ranges from approx 500 to 512
-                    KILLER_BONUS - i as i16
+                    score = KILLER_BONUS - i as i16;
                 } else {
                     // Bonus from history
                     // Ranges from 0 to 255
@@ -120,18 +123,25 @@ impl MovePredictor {
                         PlayerSide::White => &self.history_white,
                         PlayerSide::Black => &self.history_black,
                     };
-                    history[mvi.kind as usize][mvi.to as usize] as i16
+                    score = history[mvi.kind as usize][mvi.to as usize] as i16;
+                    reduction = 1;
                 }
             }
-        };
+        }
         if let Some(sq) = SquareIter(next_gs.friends_bb[PieceKind::King]).next() {
             let blockers = next_gs.friends_bb.union() | next_gs.enemies_bb.union();
             if lut::is_dangerous(sq, &next_gs.enemies_bb, blockers) {
                 // Prioritize a move that puts the enemy king in check
                 score += CHECK_BONUS;
+                reduction = 0;
+                extension = 1;
             }
         }
-        MoveScore(score)
+        MovePrediction {
+            score: MoveScore(score),
+            reduce: reduction.into(),
+            extend: extension.into(),
+        }
     }
 
     pub fn apply_cutoff_bonus(&mut self, gs: &GameState, mv: Move, ply: u16) {
