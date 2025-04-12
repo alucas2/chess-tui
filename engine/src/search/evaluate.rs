@@ -106,23 +106,21 @@ pub fn eval(gs: &GameState) -> Score {
     let mut total_material = 0;
     let mut material_diff_midgame = 0;
     let mut material_diff_endgame = 0;
-    let mut bonus = 0;
     let blockers = gs.friends_bb.union() | gs.enemies_bb.union();
     let enemies_pawns = gs.enemies_bb[Pawn];
     let friends_pawns = gs.friends_bb[Pawn];
     for kind in PieceKind::iter() {
         // Add the value of friend pieces
         for sq in SquareIter(gs.friends_bb[kind]) {
-            let (midgame_value, endgame_value, extra_value) =
+            let (midgame_value, endgame_value) =
                 friend_piece_value(kind, sq, blockers, friends_pawns, enemies_pawns);
             total_material += piece_value(kind);
             material_diff_midgame += midgame_value;
             material_diff_endgame += endgame_value;
-            bonus += extra_value;
         }
         // Subtract the value of enemy pieces
         for sq in SquareIter(gs.enemies_bb[kind]) {
-            let (midgame_value, endgame_value, extra_value) = friend_piece_value(
+            let (midgame_value, endgame_value) = friend_piece_value(
                 kind,
                 sq.mirror(),
                 blockers.swap_bytes(),
@@ -132,7 +130,6 @@ pub fn eval(gs: &GameState) -> Score {
             total_material += piece_value(kind);
             material_diff_midgame -= midgame_value;
             material_diff_endgame -= endgame_value;
-            bonus -= extra_value;
         }
     }
 
@@ -145,7 +142,7 @@ pub fn eval(gs: &GameState) -> Score {
         let material_diff_endgame = (material_diff_endgame as i32 * endgame_factor as i32) >> 15;
         (material_diff_midgame + material_diff_endgame) as i16
     };
-    Score(material_diff_blend + bonus)
+    Score(material_diff_blend)
 }
 
 fn friend_piece_value(
@@ -154,11 +151,11 @@ fn friend_piece_value(
     blockers: u64,
     friends_pawns: u64,
     enemies_pawns: u64,
-) -> (i16, i16, i16) {
+) -> (i16, i16) {
     let mobility_mask = !(lut::shift_se(enemies_pawns) | lut::shift_sw(enemies_pawns));
-    let midgame_value = piece_value_table_midgame(kind)[sq as usize];
-    let endgame_value = piece_value_table_endgame(kind)[sq as usize];
-    let extra_value = match kind {
+    let mut midgame_value = piece_value_table_midgame(kind)[sq as usize];
+    let mut endgame_value = piece_value_table_endgame(kind)[sq as usize];
+    match kind {
         Pawn => {
             let mut pawn_score = 0;
             if lut::in_front(sq) & friends_pawns != 0 {
@@ -170,24 +167,41 @@ fn friend_piece_value(
             if lut::in_front_and_adjacent_files(sq) & enemies_pawns == 0 {
                 pawn_score += 50 // Bonus for passed pawns
             }
-            pawn_score
+            midgame_value += pawn_score;
+            endgame_value += pawn_score;
         }
         // Knight, bishop, rook and queen receive a mobility bonus
-        Knight => 2 * (lut::knight_reachable(sq) & mobility_mask).count_ones() as i16,
-        Bishop => 4 * (lut::bishop_reachable(sq, blockers) & mobility_mask).count_ones() as i16,
-        Rook => 4 * (lut::rook_reachable(sq, blockers) & mobility_mask).count_ones() as i16,
+        Knight => {
+            let m = (lut::knight_reachable(sq) & mobility_mask).count_ones() as i16;
+            midgame_value += 2 * m;
+            endgame_value += 2 * m;
+        }
+        Bishop => {
+            let m = (lut::bishop_reachable(sq, blockers) & mobility_mask).count_ones() as i16;
+            midgame_value += 4 * m;
+            endgame_value += 4 * m;
+        }
+        Rook => {
+            let m = (lut::rook_reachable(sq, blockers) & mobility_mask).count_ones() as i16;
+            midgame_value += 2 * m;
+            endgame_value += 4 * m;
+        }
         Queen => {
-            2 * ((lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+            let m = ((lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
                 & mobility_mask)
-                .count_ones() as i16
+                .count_ones() as i16;
+            midgame_value += 1 * m;
+            endgame_value += 2 * m;
         }
         // Malus for a king that is too exposed
         King => {
-            -1 * (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
-                .count_ones() as i16
+            let m = (lut::bishop_reachable(sq, blockers) | lut::rook_reachable(sq, blockers))
+                .count_ones() as i16;
+            midgame_value -= 4 * m;
+            endgame_value -= 1 * m;
         }
-    };
-    (midgame_value, endgame_value, extra_value)
+    }
+    (midgame_value, endgame_value)
 }
 
 /// Get the piece-square value table for a kind of piece.
@@ -307,7 +321,7 @@ const QUEEN_VALUE: [i16; 64] = [
 #[rustfmt::skip]
 const KING_VALUE: [i16; 64] = [
     1010, 1010, 1010, 1000, 1000, 1010, 1010, 1010,
-    1010, 1010, 1000, 1000, 1000, 1000, 1010, 1010,
+    1000, 1000, 990,  990,  990,  990,  1000, 1000,
     990,  980,  980,  980,  980,  980,  980,  990,
     980,  970,  970,  960,  960,  970,  970,  980,
     970,  960,  960,  950,  950,  960,  960,  970,
