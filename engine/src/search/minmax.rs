@@ -198,8 +198,8 @@ pub fn eval_minmax_pv_split(
     // Test for a draw position
     let key = gs.key().hash();
     if is_draw(&key, gs.fiftymove_count, &ctx.history) {
-        argmax.map(|a| update_argmax(a, Score::ZERO, None, depth));
-        return Ok(Score::ZERO);
+        argmax.map(|a| update_argmax(a, Score::FORCED_DRAW, None, depth));
+        return Ok(Score::FORCED_DRAW);
     }
 
     // Lookup in the table
@@ -324,7 +324,7 @@ fn eval_minmax(
     if ply >= MAX_PLY {
         return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
     }
-    let Some(depth) = depth.minus_one() else {
+    let Some(mut depth) = depth.minus_one() else {
         return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
     };
     if ctx.stop.load(Ordering::Relaxed) {
@@ -334,7 +334,7 @@ fn eval_minmax(
     // Test for a draw position
     let key = gs.key().hash();
     if is_draw(&key, gs.fiftymove_count, &ctx.history) {
-        return Ok(Score::ZERO);
+        return Ok(Score::FORCED_DRAW);
     }
 
     // Lookup in the table
@@ -342,6 +342,15 @@ fn eval_minmax(
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
         (LookupResult::Cutoff { score }, _) => return Ok(score),
     };
+
+    // Reduce the search depth if the null move is successful
+    if let Ok(next) = gs.make_move_null() {
+        let (lo, hi) = beta.minimal_window();
+        let reduced_depth = depth.reduce(3.into());
+        if -eval_minmax(&next, -hi, -lo, reduced_depth, ply + 1, ctx)? >= beta {
+            depth = reduced_depth
+        }
+    }
 
     // Explore the branches
     ctx.statistics.expanded_nodes += 1;

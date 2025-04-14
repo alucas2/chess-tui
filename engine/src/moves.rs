@@ -151,10 +151,7 @@ impl GameState {
             }
         }
         for from in SquareIter(self.friends_bb[Queen]) {
-            for to in SquareIter(
-                (lut::bishop_reachable(from, blockers) | lut::rook_reachable(from, blockers))
-                    & dst_mask,
-            ) {
+            for to in SquareIter(lut::queen_reachable(from, blockers) & dst_mask) {
                 f(Move::normal(Queen, from, to))
             }
         }
@@ -343,6 +340,29 @@ impl GameState {
                 ..self
             })
         }
+    }
+
+    /// Make a "null move", which means that the active player skips its turn
+    pub fn make_move_null(self) -> Result<GameState, IllegalMoveError> {
+        // Check that the move does not put the king in danger
+        let blockers = self.friends_bb.union() | self.enemies_bb.union();
+        for sq in SquareIter(self.friends_bb[King]) {
+            if lut::is_dangerous(sq, &self.enemies_bb, blockers) {
+                return Err(IllegalMoveError);
+            }
+        }
+
+        // Flip sides
+        Ok(GameState {
+            pieces: self.pieces.mirror(),
+            friends_bb: self.enemies_bb.mirror(),
+            enemies_bb: self.friends_bb.mirror(),
+            side_to_move: self.side_to_move.opposite(),
+            friends_castle: self.enemies_castle,
+            enemies_castle: self.friends_castle,
+            en_passant: None,
+            ..self
+        })
     }
 
     /// Find the cheapest friendly piece in the from_mask that can attack the given square

@@ -42,6 +42,11 @@ pub fn rook_reachable(pos: SquareIndex, blockers: u64) -> u64 {
     result
 }
 
+/// Equivalent to `bishop_reachable | rook_reachable`
+pub fn queen_reachable(pos: SquareIndex, blockers: u64) -> u64 {
+    bishop_reachable(pos, blockers) | rook_reachable(pos, blockers)
+}
+
 /// Get the squares that a piece moves through while castling.
 pub fn castle_ray(from: SquareIndex, to: SquareIndex) -> u64 {
     let mut result = from.bb().get();
