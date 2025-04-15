@@ -85,7 +85,7 @@ impl MovePredictor {
         let mvi = mv.unwrap();
         const KILLER_BONUS: i16 = 512;
         const CAPTURE_MULT: i16 = 20;
-        const CHECK_BONUS: i16 = 14000;
+        const PRIORITIZE_BONUS: i16 = 14000;
 
         let next_gs = gs.make_move_exchange_eval(mv);
         let mut extension = 0;
@@ -132,10 +132,17 @@ impl MovePredictor {
             let blockers = next_gs.friends_bb.union() | next_gs.enemies_bb.union();
             if lut::is_dangerous(sq, &next_gs.enemies_bb, blockers) {
                 // Prioritize a move that puts the enemy king in check
-                score += CHECK_BONUS;
+                score += PRIORITIZE_BONUS;
                 reduction = 0;
                 extension = 1;
             }
+        }
+        match mvi.flag {
+            // Order promotions: queen first, then knight, bishop and rook are useless
+            MoveFlag::Promotion(PieceKind::Queen) => score += 2,
+            MoveFlag::Promotion(PieceKind::Knight) => score += 1,
+            MoveFlag::Promotion(_) => score = i16::MIN,
+            _ => {}
         }
         MovePrediction {
             score: MoveScore(score),

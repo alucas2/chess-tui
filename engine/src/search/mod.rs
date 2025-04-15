@@ -116,6 +116,7 @@ impl Search {
                     };
                     match final_score.info() {
                         // Stop deepening when a checkmate in a minimal number of moves is found
+                        // Note: we may still miss an end of game due to reductions though
                         ScoreInfo::Win(ply) | ScoreInfo::Loss(ply) if ply <= depth => break,
                         _ => {}
                     };
