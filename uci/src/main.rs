@@ -16,38 +16,46 @@ fn main() -> anyhow::Result<()> {
 
     // Perpetually running search thread
     let search = SearchThread::new();
+    let mut settings = Settings::default();
 
     // Event loop
     loop {
         match recv_command()? {
             UciCommand::Uci => {
+                // Engine informations
                 println!("id name BlunderCrab");
                 println!("id author alucas2");
+
+                // Engine settings
+                let defaults = Settings::default();
                 println!(
                     "option name Hash type spin default {} min 1 max 4096",
-                    settings::DEFAULT_TABLE_SIZE_MB
+                    defaults.table_size_megabytes
                 );
-                println!("option name UCI_Chess960 type check default false");
                 println!(
                     "option name Threads type spin default {} min 1 max 4",
-                    settings::DEFAULT_NUM_THREADS
+                    defaults.num_threads
                 );
+                println!(
+                    "option name UseOpponentsTime type check default {}",
+                    defaults.use_opponents_time
+                );
+                println!("option name UCI_Chess960 type check default false");
                 println!("uciok");
             }
             UciCommand::Debug(_) => {}
             UciCommand::IsReady => println!("readyok"),
-            UciCommand::SetOption { name, value } => match name.as_str() {
-                "Hash" => {
-                    let megabytes = value.unwrap_or_default().parse()?;
-                    settings::set_table_size_megabytes(megabytes)
+            UciCommand::SetOption { name, value } => {
+                let value = value.unwrap_or_default();
+                match name.as_str() {
+                    "Hash" => settings.table_size_megabytes = value.parse()?,
+                    "Threads" => settings.num_threads = value.parse()?,
+                    "UseOpponentsTime" => settings.use_opponents_time = value.parse()?,
+                    "UCI_Chess960" => {}
+                    other => bail!("Unknown option {other}"),
                 }
-                "Threads" => {
-                    let threads = value.unwrap_or_default().parse()?;
-                    settings::set_num_threads(threads);
-                }
-                "UCI_Chess960" => {}
-                other => bail!("Unknown option {other}"),
-            },
+                search.change_settings(settings);
+            }
             UciCommand::Register { .. } => {}
             UciCommand::UciNewGame => {}
             UciCommand::Position { fen, moves } => {
@@ -72,7 +80,7 @@ fn main() -> anyhow::Result<()> {
                     PlayerSide::White => (options.wtime, options.winc),
                     PlayerSide::Black => (options.btime, options.binc),
                 };
-                search.start(
+                search.change_position(
                     initial,
                     moves_from_initial.clone(),
                     current,
@@ -83,6 +91,23 @@ fn main() -> anyhow::Result<()> {
             UciCommand::Stop => search.stop(),
             UciCommand::PonderHit => {}
             UciCommand::Quit => return Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Settings {
+    table_size_megabytes: usize,
+    num_threads: usize,
+    use_opponents_time: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            table_size_megabytes: settings::DEFAULT_TABLE_SIZE_MB,
+            num_threads: settings::DEFAULT_NUM_THREADS,
+            use_opponents_time: false,
         }
     }
 }
@@ -102,6 +127,7 @@ enum SearchMessage {
         time_left: Duration,
         time_increment: Duration,
     },
+    ChangeSettings(Settings),
 }
 
 enum SearchState {
@@ -114,7 +140,10 @@ enum SearchState {
         deadline: Instant,
         stop: bool,
     },
-    Pondering(Search),
+    Pondering {
+        search: Search,
+        deadline: Instant,
+    },
 }
 
 impl SearchThread {
@@ -124,6 +153,7 @@ impl SearchThread {
         let (message_tx, message_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
             let mut state = SearchState::Waiting;
+            let mut settings = Settings::default();
             loop {
                 match message_rx.try_recv() {
                     Ok(SearchMessage::StopSearching) => match state {
@@ -148,15 +178,26 @@ impl SearchThread {
                             .min(maximum_time_to_think)
                             .min(Duration::from_secs(10));
 
+                        let search =
+                            Search::start(initial, moves_from_initial.iter().copied()).unwrap();
                         state = SearchState::Searching {
-                            search: Search::start(initial, moves_from_initial.iter().copied())
-                                .unwrap(),
+                            search,
                             initial,
                             moves_from_initial,
                             current,
                             deadline: Instant::now() + time_to_think,
                             stop: false,
                         };
+                    }
+                    Ok(SearchMessage::ChangeSettings(new_settings)) => {
+                        // Pass the new settings to the engine
+                        if new_settings.table_size_megabytes != settings.table_size_megabytes {
+                            settings::set_table_size_megabytes(new_settings.table_size_megabytes);
+                        }
+                        if new_settings.num_threads != settings.num_threads {
+                            settings::set_num_threads(new_settings.num_threads);
+                        }
+                        settings = new_settings;
                     }
                     Ok(SearchMessage::Quit) | Err(mpsc::TryRecvError::Disconnected) => break,
                     Err(mpsc::TryRecvError::Empty) => {}
@@ -202,21 +243,29 @@ impl SearchThread {
                                 status.stats.expanded_nodes + status.stats.expanded_nodes_quiescent
                             );
 
-                            // Stop the search and continue pondering if possible
                             if *stop {
                                 match result.pv.first() {
                                     Some(best) => {
                                         println!("bestmove {}", best.info(current));
-                                        state = SearchState::Pondering(
-                                            Search::start(
+                                        if settings.use_opponents_time {
+                                            // Continue pondering
+                                            // (i.e. search while pretending to be the opponent)
+                                            let time_to_ponder = Duration::from_secs(10);
+                                            let search = Search::start(
                                                 *initial,
                                                 moves_from_initial
                                                     .iter()
                                                     .copied()
                                                     .chain(std::iter::once(*best)),
                                             )
-                                            .expect("Best move should be legal"),
-                                        );
+                                            .expect("Best move should be legal");
+                                            state = SearchState::Pondering {
+                                                search,
+                                                deadline: Instant::now() + time_to_ponder,
+                                            };
+                                        } else {
+                                            state = SearchState::Waiting;
+                                        }
                                     }
                                     None => {
                                         println!("bestmove 0000");
@@ -226,7 +275,14 @@ impl SearchThread {
                             }
                         }
                     }
-                    SearchState::Pondering(ref _ponder_token) => {}
+                    SearchState::Pondering {
+                        search: ref _ponder_token,
+                        deadline,
+                    } => {
+                        if Instant::now() > deadline {
+                            state = SearchState::Waiting;
+                        }
+                    }
                     _ => {}
                 };
                 thread::sleep(Duration::from_millis(100));
@@ -239,7 +295,7 @@ impl SearchThread {
     }
 
     /// Set the position and search from there
-    fn start(
+    fn change_position(
         &self,
         initial: GameState,
         moves_from_initial: Vec<Move>,
@@ -261,6 +317,13 @@ impl SearchThread {
     /// Stop the search and print the best move
     fn stop(&self) {
         self.message_tx.send(SearchMessage::StopSearching).unwrap();
+    }
+
+    /// Change search settings
+    fn change_settings(&self, settings: Settings) {
+        self.message_tx
+            .send(SearchMessage::ChangeSettings(settings))
+            .unwrap();
     }
 }
 
