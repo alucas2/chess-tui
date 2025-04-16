@@ -361,6 +361,7 @@ impl GameState {
             friends_castle: self.enemies_castle,
             enemies_castle: self.friends_castle,
             en_passant: None,
+            fiftymove_count: 0,
             ..self
         })
     }

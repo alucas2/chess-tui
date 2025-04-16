@@ -1,16 +1,15 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, RwLock,
+    RwLock,
 };
 
 use branch_iterator::Branch;
-use rayon::iter::{ParallelBridge, ParallelIterator};
 use smallvec::SmallVec;
 
 use crate::{GameState, GameStateKeyWithHash, Move};
 
 use super::{
-    evaluate::{self, AtomicScore, Score},
+    evaluate::{self, Score},
     move_predictor::{self, MovePrediction, MovePredictor, MoveScore},
     shared_table::{ScoreKind, Table, TableValue},
     SearchInterrupted,
@@ -36,6 +35,8 @@ pub struct MinmaxContext<'a> {
     pub statistics: MinmaxStatistics,
     /// Stack of previous game states, used to detect draws
     pub history: Vec<GameStateKeyWithHash>,
+    /// Used by the root move to send its results
+    pub result_tx: Option<&'a MinmaxResultSender>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,7 +52,7 @@ pub struct MinmaxStatistics {
 }
 
 /// Result of the minmax search at the root node
-type Argmax = RwLock<Option<MinmaxResult>>;
+pub type MinmaxResultSender = RwLock<Option<MinmaxResult>>;
 
 #[derive(Clone, Copy)]
 pub struct MinmaxResult {
@@ -69,7 +70,6 @@ enum LookupResult {
 }
 
 /// Lookup a position in the table and take the opportunity to restrict the alpha and beta bounds.
-/// Returns (alpha, beta, best_move).
 fn lookup_table(
     key: &GameStateKeyWithHash,
     mut alpha: Score,
@@ -78,10 +78,6 @@ fn lookup_table(
     ply: u16,
     ctx: &mut MinmaxContext,
 ) -> (LookupResult, Option<Move>) {
-    // Restrict alpha and beta within the loss/win bounds for the current ply
-    alpha = alpha.max(Score::LOSS.add_ply(ply));
-    beta = beta.min(Score::WIN.add_ply(ply + 1));
-
     // Restrict alpha and beta further by probing the transposition table
     let table_move = match ctx.table.lookup(key) {
         Some(e) => {
@@ -164,10 +160,15 @@ fn is_draw(
 }
 
 /// Report a potential score and best move
-fn update_argmax(argmax: &Argmax, new_score: Score, new_best: Option<Move>, new_depth: Depth) {
-    let mut argmax = argmax.write().unwrap();
-    if argmax.is_none_or(|argmax| new_depth > argmax.depth || new_score > argmax.score) {
-        *argmax = Some(MinmaxResult {
+fn update_result(
+    result_tx: &MinmaxResultSender,
+    new_score: Score,
+    new_best: Option<Move>,
+    new_depth: Depth,
+) {
+    let mut result = result_tx.write().unwrap();
+    if result.is_none_or(|r| new_depth > r.depth || new_score > r.score) {
+        *result = Some(MinmaxResult {
             depth: new_depth,
             score: new_score,
             best: new_best,
@@ -175,239 +176,130 @@ fn update_argmax(argmax: &Argmax, new_score: Score, new_best: Option<Move>, new_
     }
 }
 
-/// Evaluate a position with a parallel minmax using "principal variation split"
-pub fn eval_minmax_pv_split(
+/// Evaluate a position with a minmax search
+pub fn eval_minmax(
     gs: &GameState,
     alpha: Score,
     beta: Score,
     depth: Depth,
     ply: u16,
     ctx: &mut MinmaxContext,
-    argmax: Option<&Argmax>,
 ) -> Result<Score, SearchInterrupted> {
     if ply >= MAX_PLY {
-        return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
+        return eval_quiescent(gs, alpha, beta, ctx);
     }
-    let Some(depth) = depth.minus_one() else {
-        return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
+    let Some(mut depth) = depth.minus_one() else {
+        return eval_quiescent(gs, alpha, beta, ctx);
     };
     if ctx.stop.load(Ordering::Relaxed) {
         return Err(SearchInterrupted);
     }
 
+    // Only the root node should send results
+    let result = ctx.result_tx.take();
+
     // Test for a draw position
     let key = gs.key().hash();
     if is_draw(&key, gs.fiftymove_count, &ctx.history) {
-        argmax.map(|a| update_argmax(a, Score::FORCED_DRAW, None, depth));
+        result.map(|a| update_result(a, Score::FORCED_DRAW, None, depth));
         return Ok(Score::FORCED_DRAW);
     }
+
+    // Restrict alpha and beta within the loss/win bounds for the current ply
+    let alpha = alpha.max(Score::LOSS.add_ply(ply));
+    let beta = beta.min(Score::WIN.add_ply(ply + 1));
 
     // Lookup in the table
     let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ply, ctx) {
         (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
-        (LookupResult::Cutoff { score }, best_move) => {
-            argmax.map(|a| update_argmax(a, score, best_move, depth));
+        (LookupResult::Cutoff { score }, table_move) => {
+            result.map(|a| update_result(a, score, table_move, depth));
             return Ok(score);
         }
     };
 
-    // Explore the branches
-    ctx.statistics.expanded_nodes += 1;
+    // Push the current gamestate to the history for repetition tests.
+    // Do not forget to pop before leaving the function
     ctx.history.push(key);
-    let (score, best) = if let Some((Branch { mv, next, pred }, rest)) =
-        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
-    {
-        let mut best = mv;
-        let mut score = {
-            // Search the first branch first, passing the parallel flag
-            // This method is called PV-splitting
-            let depth = depth.extend(pred.extend);
-            -eval_minmax_pv_split(&next, -beta, -alpha, depth, ply + 1, ctx, None)?
-        };
-        argmax.map(|a| update_argmax(a, score, Some(mv), depth));
-        if score >= beta {
-            // Cutoff (no need to update the move predictor because we don't use it here)
-        } else {
-            // The remaining branches are explored in parallel
-            let shared_score = AtomicScore::new(score);
-            let shared_score_and_best = Mutex::new((score, best));
-            let shared_stat = Mutex::new(&mut ctx.statistics);
-            rest.get_or_generate(&ctx.move_predictor, ply)
-                .par_bridge()
-                .try_for_each(|Branch { mv, next, pred }| {
-                    // Create a new context just for this branch, because it's on its own thread
-                    let ctx = &mut MinmaxContext {
-                        stop: ctx.stop,
-                        table: ctx.table,
-                        move_predictor: MovePredictor::new(),
-                        statistics: MinmaxStatistics::default(),
-                        history: ctx.history.clone(),
-                    };
-                    'end: {
-                        let mut score = shared_score.load();
-                        if score >= beta {
-                            break 'end; // Cutoff (first opportunity)
-                        }
-                        let depth = depth.extend(pred.extend);
-                        let (lo, hi) = (-alpha.max(score)).minimal_window();
-
-                        // Explore with minimal bounds and reduced depth
-                        let reduced_depth = depth.reduce(pred.reduce);
-                        if reduced_depth != depth {
-                            let temp = -eval_minmax(&next, lo, hi, reduced_depth, ply + 1, ctx)?;
-                            score = shared_score.load();
-                            if score >= beta {
-                                break 'end; // Cutoff (second opportunity)
-                            }
-                            if temp <= score {
-                                break 'end; // Branch (probably) does not beat the current score
-                            }
-                        }
-
-                        // Explore with minimal bounds
-                        let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
-                        score = shared_score.load();
-                        if score >= beta {
-                            break 'end; // Cutoff (third opportunity)
-                        }
-                        if temp <= score {
-                            break 'end; // Branch does not beat the current score
-                        }
-
-                        score = if temp > alpha && temp < beta {
-                            // Re-explore with normal bounds to get the true score
-                            -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?
-                        } else {
-                            temp
-                        };
-                        shared_score.fetch_max(score);
-                        let mut score_and_best = shared_score_and_best.lock().unwrap();
-                        if score > score_and_best.0 {
-                            score_and_best.0 = score;
-                            score_and_best.1 = mv;
-                            argmax.map(|a| update_argmax(a, score, Some(mv), depth));
-                        }
-                    }
-                    // Add the statistics of this branch to the main statistics
-                    shared_stat.lock().unwrap().add(&ctx.statistics);
-                    Ok(())
-                })?;
-            (score, best) = shared_score_and_best.into_inner().unwrap();
-        }
-        (score, Some(best))
-    } else {
-        // No branches to explore
-        if gs.is_check() {
-            argmax.map(|a| update_argmax(a, Score::LOSS.add_ply(ply), None, depth));
-            (Score::LOSS.add_ply(ply), None) // Checkmate
-        } else {
-            argmax.map(|a| update_argmax(a, Score::ZERO, None, depth));
-            (Score::ZERO, None) // Stalemate
-        }
-    };
-    ctx.history.pop();
-
-    // Store the result in the table
-    update_table(key, alpha, beta, depth, ply, score, best, ctx);
-    Ok(score)
-}
-
-/// Evaluate a position with a minmax search
-fn eval_minmax(
-    gs: &GameState,
-    alpha: Score,
-    beta: Score,
-    depth: Depth,
-    ply: u16,
-    ctx: &mut MinmaxContext,
-) -> Result<Score, SearchInterrupted> {
-    if ply >= MAX_PLY {
-        return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
-    }
-    let Some(mut depth) = depth.minus_one() else {
-        return Ok(eval_quiescent(gs, alpha, beta, ctx)?);
-    };
-    if ctx.stop.load(Ordering::Relaxed) {
-        return Err(SearchInterrupted);
-    }
-
-    // Test for a draw position
-    let key = gs.key().hash();
-    if is_draw(&key, gs.fiftymove_count, &ctx.history) {
-        return Ok(Score::FORCED_DRAW);
-    }
-
-    // Lookup in the table
-    let (alpha, beta, table_move) = match lookup_table(&key, alpha, beta, depth, ply, ctx) {
-        (LookupResult::UpdateBounds { alpha, beta }, table_move) => (alpha, beta, table_move),
-        (LookupResult::Cutoff { score }, _) => return Ok(score),
-    };
 
     // Reduce the search depth if the null move is successful
-    if let Ok(next) = gs.make_move_null() {
-        let (lo, hi) = beta.minimal_window();
-        let reduced_depth = depth.reduce(3.into());
-        if -eval_minmax(&next, -hi, -lo, reduced_depth, ply + 1, ctx)? >= beta {
-            depth = reduced_depth
+    if !evaluate::null_move_risky(gs) {
+        if let Ok(next) = gs.make_move_null() {
+            let (lo, hi) = beta.minimal_window();
+            let reduced_depth = depth.reduce(3.into());
+            if -eval_minmax(&next, -hi, -lo, reduced_depth, ply + 1, ctx)? >= beta {
+                depth = reduced_depth
+            }
         }
     }
 
     // Explore the branches
     ctx.statistics.expanded_nodes += 1;
-    ctx.history.push(key);
-    let (score, best) = if let Some((Branch { mv, next, pred }, rest)) =
-        branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
-    {
+    let (score, best) = 'cutoff: {
+        let Some((Branch { mv, next, pred }, rest)) =
+            branch_iterator::first_and_rest(gs, table_move, &ctx.move_predictor, ply)
+        else {
+            // No branches to explore
+            let best = None;
+            let score = if gs.is_check() {
+                Score::LOSS.add_ply(ply) // Checkmate
+            } else {
+                Score::ZERO // Stalemate
+            };
+            result.map(|a| update_result(a, score, best, depth));
+            break 'cutoff (score, best); // Cutoff
+        };
+
+        // Explore the first branch
         let mut best = mv;
         let mut score = {
-            // The first branch is explored normally
             let depth = depth.extend(pred.extend);
             -eval_minmax(&next, -beta, -alpha, depth, ply + 1, ctx)?
         };
+        result.map(|a| update_result(a, score, Some(mv), depth));
         if score >= beta {
-            ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
-        } else {
-            // The remaining branches are explored with a "principal variation search"
-            for Branch { mv, next, pred } in rest.get_or_generate(&ctx.move_predictor, ply) {
-                let depth = depth.extend(pred.extend);
-                let (lo, hi) = (-alpha.max(score)).minimal_window();
+            ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply);
+            break 'cutoff (score, Some(mv)); // Cutoff
+        }
 
-                // Explore with minimal bounds and reduced depth
-                let reduced_depth = depth.reduce(pred.reduce);
-                if reduced_depth != depth {
-                    let temp = -eval_minmax(&next, lo, hi, reduced_depth, ply + 1, ctx)?;
-                    if temp <= score {
-                        continue; // Branch (probably) does not beat the current score
-                    }
-                }
+        // Explore the remaining branches
+        for Branch { mv, next, pred } in rest.get_or_generate(&ctx.move_predictor, ply) {
+            let depth = depth.extend(pred.extend);
+            let (lo, hi) = (-alpha.max(score)).minimal_window();
 
-                // Explore with minimal bounds
-                let temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
+            // Explore with minimal bounds and reduced depth
+            let reduced_depth = depth.reduce(pred.reduce);
+            if reduced_depth != depth {
+                let temp = -eval_minmax(&next, lo, hi, reduced_depth, ply + 1, ctx)?;
                 if temp <= score {
-                    continue; // Branch does not beat the current score
-                }
-
-                best = mv;
-                score = if temp > alpha && temp < beta {
-                    // Re-explore with normal bounds to get the true score
-                    -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?
-                } else {
-                    temp
-                };
-                if score >= beta {
-                    ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply); // Cutoff
-                    break;
+                    continue; // Branch (probably) does not beat the current score
                 }
             }
+
+            // Explore with minimal bounds
+            let mut temp = -eval_minmax(&next, lo, hi, depth, ply + 1, ctx)?;
+            if temp <= score {
+                continue; // Branch does not beat the current score
+            }
+
+            // Re-explore with normal bounds to get the true score
+            if temp > alpha && temp < beta {
+                temp = -eval_minmax(&next, -beta, -temp, depth, ply + 1, ctx)?;
+                if temp <= score {
+                    continue; // Branch does not actually beat the current score
+                }
+            }
+
+            best = mv;
+            score = temp;
+            result.map(|a| update_result(a, score, Some(mv), depth));
+            if score >= beta {
+                ctx.move_predictor.apply_cutoff_bonus(gs, mv, ply);
+                break 'cutoff (score, Some(mv)); // Cutoff
+            }
         }
-        (score, Some(best))
-    } else {
-        // No branches to explore
-        if gs.is_check() {
-            (Score::LOSS.add_ply(ply), None) // Checkmate
-        } else {
-            (Score::ZERO, None) // Stalemate
-        }
+
+        (score, Some(best)) // No cutoff
     };
     ctx.history.pop();
 

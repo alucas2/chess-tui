@@ -270,8 +270,31 @@ impl Home {
             None => "?".to_string(),
         };
 
-        let stats = status.stats;
-        let text = format!("Depth: {depth}\nPV:{pv}\n{stats:#?}");
+        // Show stats
+        let mut text = format!("Depth: {depth}\nPV:{pv}\n");
+        text.push_str(&format!(
+            "\n[Nodes] Normal: {}, Quiescence: {}",
+            status.stats.expanded_nodes, status.stats.expanded_nodes_quiescent,
+        ));
+        text.push_str(&format!(
+            "\n[Table] Hits: {}, Rewrites: {}",
+            status.stats.table_hits, status.stats.table_rewrites
+        ));
+        for (i, worker) in status.workers.iter().enumerate() {
+            if let Some(worker) = worker {
+                text.push_str(&format!(
+                    "\n[Worker {i}] Depth: {}, Score: {} Best: {}",
+                    worker.depth,
+                    worker.score,
+                    worker
+                        .best
+                        .map(|x| moves::human_notation(x, self.gamestate.current()))
+                        .unwrap_or("-".into()),
+                ))
+            } else {
+                text.push_str("\n???");
+            }
+        }
         block.render(layout.ponder_panel, buf);
         Paragraph::new(text).render(paragraph_area, buf);
     }

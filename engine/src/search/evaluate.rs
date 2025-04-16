@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicI16, Ordering};
-
 use crate::{
     lookup_tables as lut, GameState,
     PieceKind::{self, *},
@@ -12,11 +10,6 @@ use crate::{
 #[repr(transparent)]
 pub struct Score(pub(crate) i16);
 
-/// Atomic version of score
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct AtomicScore(AtomicI16);
-
 #[derive(Debug, Clone, Copy)]
 pub enum ScoreInfo {
     Normal(i16),
@@ -24,6 +17,16 @@ pub enum ScoreInfo {
     Win(u16),
     /// Position is a loss in the specified number of halfmoves
     Loss(u16),
+}
+
+impl std::fmt::Display for ScoreInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScoreInfo::Normal(x) => write!(f, "{x}"),
+            ScoreInfo::Win(x) => write!(f, "M{x}"),
+            ScoreInfo::Loss(x) => write!(f, "-M{x}"),
+        }
+    }
 }
 
 impl Score {
@@ -88,20 +91,6 @@ impl std::ops::Neg for Score {
 
     fn neg(self) -> Self::Output {
         Score(-self.0)
-    }
-}
-
-impl AtomicScore {
-    pub fn new(val: Score) -> Self {
-        AtomicScore(AtomicI16::new(val.0))
-    }
-
-    pub fn load(&self) -> Score {
-        Score(self.0.load(Ordering::Relaxed))
-    }
-
-    pub fn fetch_max(&self, val: Score) -> Score {
-        Score(self.0.fetch_max(val.0, Ordering::Relaxed))
     }
 }
 
@@ -210,6 +199,19 @@ fn friend_piece_value(
         }
     }
     (midgame_value, endgame_value, phase_value)
+}
+
+/// Returns true if it's too risky too assume that the null is a bad move
+pub fn null_move_risky(gs: &GameState) -> bool {
+    gs.friends_bb[Knight]
+        | gs.friends_bb[Bishop]
+        | gs.friends_bb[Rook]
+        | gs.friends_bb[Queen]
+        | gs.enemies_bb[Knight]
+        | gs.enemies_bb[Bishop]
+        | gs.enemies_bb[Rook]
+        | gs.enemies_bb[Queen]
+        == 0
 }
 
 /// Get the flat value of a kind of piece
