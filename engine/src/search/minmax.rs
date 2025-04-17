@@ -131,13 +131,17 @@ fn update_table(
 
 /// Probe the game state history for a threefold repeition or fiftymove draw.
 ///
+/// NOTE: We test for twofold repetition instead of threefold so that draw situations
+/// are discovered faster during the search. A position being declared
+/// a draw does not necessarily means that the game should end.
+///
 /// NOTE: Forced draws should not be stored in the transposition table
 /// or else tranpositions could incorrectly be labelled as draw.
 /// This measure does not exactly solve the issue of "draw contamination",
 /// e.g. when the search avoids a branch because the enemy threatens to force a draw,
 /// then store its score in the table, and later probe this "draw contaminated" score
 /// even though the draw threat no longer exists.
-fn is_draw(
+fn is_repetition(
     key: &GameStateKeyWithHash,
     fiftymove_counter: u16,
     history: &[GameStateKeyWithHash],
@@ -145,14 +149,10 @@ fn is_draw(
     if fiftymove_counter >= 100 {
         return true;
     }
-    let mut repetitions = 1;
     let mut i = 2;
     while i <= fiftymove_counter as usize && i <= history.len() {
         if &history[history.len() - i] == key {
-            repetitions += 1;
-            if repetitions == 3 {
-                return true;
-            }
+            return true;
         }
         i += 2;
     }
@@ -195,14 +195,16 @@ pub fn eval_minmax(
         return Err(SearchInterrupted);
     }
 
-    // Only the root node should send results
+    // This is None for all nodes but the root because only the root node should send results
     let result = ctx.result_tx.take();
 
-    // Test for a draw position
+    // Test for a draw position, but we want to keep searching if we are at the root
     let key = gs.key().hash();
-    if is_draw(&key, gs.fiftymove_count, &ctx.history) {
-        result.map(|a| update_result(a, Score::FORCED_DRAW, None, depth));
-        return Ok(Score::FORCED_DRAW);
+    if (is_repetition(&key, gs.fiftymove_count, &ctx.history)
+        || evaluate::insufficient_material(gs))
+        && result.is_none()
+    {
+        return Ok(Score::ZERO);
     }
 
     // Restrict alpha and beta within the loss/win bounds for the current ply

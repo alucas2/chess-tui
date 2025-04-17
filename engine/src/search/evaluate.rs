@@ -36,8 +36,6 @@ impl Score {
     pub const WIN: Score = Score(i16::MAX);
     /// Minimum score, when the active player is checkmated
     pub const LOSS: Score = Score(-i16::MAX);
-    /// Slightly negative score, when the active player is forced to draw
-    pub const FORCED_DRAW: Score = Score(-50);
 
     /// Add the specified number of plies to the score, such that:
     /// - Wins with a lower number of plies are favored
@@ -203,15 +201,24 @@ fn friend_piece_value(
 
 /// Returns true if it's too risky too assume that the null is a bad move
 pub fn null_move_risky(gs: &GameState) -> bool {
-    gs.friends_bb[Knight]
+    let non_pawns =
+        gs.friends_bb[Knight] | gs.friends_bb[Bishop] | gs.friends_bb[Rook] | gs.friends_bb[Queen];
+    non_pawns == 0
+}
+
+/// Returns true if there is no sufficient material to end the game
+pub fn insufficient_material(gs: &GameState) -> bool {
+    let knights_bishops = gs.friends_bb[Knight]
         | gs.friends_bb[Bishop]
+        | gs.enemies_bb[Knight]
+        | gs.enemies_bb[Bishop];
+    let other_pieces = gs.friends_bb[Pawn]
         | gs.friends_bb[Rook]
         | gs.friends_bb[Queen]
-        | gs.enemies_bb[Knight]
-        | gs.enemies_bb[Bishop]
+        | gs.enemies_bb[Pawn]
         | gs.enemies_bb[Rook]
-        | gs.enemies_bb[Queen]
-        == 0
+        | gs.enemies_bb[Queen];
+    other_pieces == 0 && knights_bishops.count_ones() <= 1
 }
 
 /// Get the flat value of a kind of piece
