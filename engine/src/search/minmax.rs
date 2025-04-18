@@ -11,7 +11,7 @@ use crate::{GameState, GameStateKeyWithHash, Move};
 use super::{
     evaluate::{self, Score},
     move_predictor::{self, MovePrediction, MovePredictor, MoveScore},
-    shared_table::{ScoreKind, Table, TableValue},
+    shared_table::{ScoreKind, TableEntry, TableEntryCell},
     SearchInterrupted,
 };
 
@@ -28,7 +28,7 @@ pub struct MinmaxContext<'a> {
     /// Shared flag that is set when the search must stop
     pub stop: &'a AtomicBool,
     /// Shared transposition table
-    pub table: &'a Table,
+    pub table: &'a [TableEntryCell],
     /// Stateful move predictor
     pub move_predictor: MovePredictor,
     /// Search performance metrics
@@ -79,8 +79,9 @@ fn lookup_table(
     ctx: &mut MinmaxContext,
 ) -> (LookupResult, Option<Move>) {
     // Restrict alpha and beta further by probing the transposition table
-    let table_move = match ctx.table.lookup(key) {
-        Some(e) => {
+    let index = key.hash as usize % ctx.table.len();
+    let table_move = match ctx.table[index].try_load() {
+        Some(Some(e)) if e.key == key.key => {
             ctx.statistics.table_hits += 1;
             if e.depth >= desired_depth {
                 let score = e.score.add_ply(ply);
@@ -95,7 +96,7 @@ fn lookup_table(
             }
             e.best
         }
-        None => None,
+        _ => None,
     };
     (LookupResult::UpdateBounds { alpha, beta }, table_move)
 }
@@ -118,13 +119,15 @@ fn update_table(
     } else {
         ScoreKind::Exact
     };
-    let table_value = TableValue {
+    let index = key.hash as usize % ctx.table.len();
+    let e = TableEntry {
+        key: key.key,
         depth,
         score: score.sub_ply(ply),
         score_kind,
         best,
     };
-    if ctx.table.update(key, table_value) {
+    if ctx.table[index].try_store(Some(e)) {
         ctx.statistics.table_rewrites += 1;
     }
 }

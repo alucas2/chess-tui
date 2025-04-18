@@ -14,20 +14,17 @@ pub struct GameStateKey {
     pub(crate) en_passant: Option<FileIndex>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GameStateKeyExtra<X> {
-    key: GameStateKey,
-    extra: X,
-}
-
+/// GameState key with its hash
 pub type GameStateKeyWithHash = GameStateKeyExtraWithHash<()>;
 
+/// GameStateKey together with some and extra data and the hash of both
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameStateKeyExtraWithHash<X> {
     // Put the hash first so its equality is tested first
     // giving the opportunity to short-circuit the key equality test
     pub hash: u64,
-    pub key: GameStateKeyExtra<X>,
+    pub key: GameStateKey,
+    pub key_extra: X,
 }
 
 impl GameStateKey {
@@ -35,11 +32,14 @@ impl GameStateKey {
         self.hash_with(())
     }
 
-    pub fn hash_with<X: Hash>(self, extra: X) -> GameStateKeyExtraWithHash<X> {
-        let key = GameStateKeyExtra { key: self, extra };
+    pub fn hash_with<X: Hash + Copy>(self, key_extra: X) -> GameStateKeyExtraWithHash<X> {
         let mut hash = FxHasher::default();
-        key.hash(&mut hash);
+        (self, key_extra).hash(&mut hash);
         let hash = hash.finish();
-        GameStateKeyExtraWithHash { key, hash }
+        GameStateKeyExtraWithHash {
+            hash,
+            key: self,
+            key_extra,
+        }
     }
 }

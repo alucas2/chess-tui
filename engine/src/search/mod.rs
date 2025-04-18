@@ -15,7 +15,7 @@ use std::{
 use evaluate::Score;
 use minmax::{MinmaxContext, MinmaxResult, MinmaxResultSender, MinmaxStatistics};
 use move_predictor::MovePredictor;
-use shared_table::TableValue;
+use shared_table::TableEntry;
 
 use crate::{GameState, IllegalMoveError, Move};
 
@@ -227,8 +227,9 @@ impl Search {
                     if seen_positions.contains(&key) {
                         break; // PV forms a loop
                     }
-                    mv = match shared_table::get().lookup(&key) {
-                        Some(TableValue { best: Some(mv), .. }) => mv,
+                    let table = shared_table::get();
+                    mv = match table[key.hash as usize % table.len()].try_load() {
+                        Some(Some(e @ TableEntry { best: Some(mv), .. })) if e.key == key.key => mv,
                         _ => break, // PV stops here
                     };
                     pv.push(mv);

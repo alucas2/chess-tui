@@ -5,15 +5,14 @@ mod game_state_key;
 mod lookup_tables;
 mod moves;
 mod search;
-mod transposition_table;
 
 use std::num::NonZeroU64;
 
+pub use atomic_cell::AtomicCell;
 pub use game_state::GameState;
-pub use game_state_key::{GameStateKey, GameStateKeyExtra, GameStateKeyWithHash};
+pub use game_state_key::{GameStateKey, GameStateKeyWithHash};
 pub use moves::{IllegalMoveError, Move, MoveFlag, MoveInfo};
 pub use search::{settings, ScoreInfo, Search, SearchStatus};
-pub use transposition_table::Table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PieceKind {

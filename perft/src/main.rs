@@ -3,20 +3,28 @@
 
 use rayon::prelude::*;
 
-use engine::GameState;
+use engine::{GameState, GameStateKey};
 use smallvec::SmallVec;
 
 // GameState + depth -> perft
-type Cache = engine::Table<u32, u32>;
+type Cache = Vec<engine::AtomicCell<Option<CacheEntry>>>;
+
+#[derive(Clone, Copy)]
+struct CacheEntry {
+    key: GameStateKey,
+    depth: u32,
+    value: u32,
+}
 
 fn perft(gs: &GameState, depth: u32, parallel: bool, cache: &Cache) -> u32 {
     if depth == 0 {
         return 1;
     }
     let key = gs.key().hash_with(depth);
-    match cache.lookup(&key) {
-        Some(value) => value,
-        None => {
+    let index = key.hash as usize % cache.len();
+    match cache[index].try_load() {
+        Some(Some(e)) if e.key == key.key && e.depth == depth => e.value,
+        _ => {
             let mut moves: SmallVec<[_; 64]> = SmallVec::new();
             gs.pseudo_legal_moves(|mv| moves.push(mv));
             let value = if parallel {
@@ -32,7 +40,11 @@ fn perft(gs: &GameState, depth: u32, parallel: bool, cache: &Cache) -> u32 {
                     .map(|next_gs| perft(&next_gs, depth - 1, false, cache))
                     .sum()
             };
-            cache.update(key, value);
+            cache[index].try_store(Some(CacheEntry {
+                key: key.key,
+                depth,
+                value,
+            }));
             value
         }
     }
@@ -47,7 +59,9 @@ fn main() {
     }
 
     let t0 = std::time::Instant::now();
-    let cache = Cache::new(2_usize.pow(22));
+    let cache = (0..2_usize.pow(22))
+        .map(|_| engine::AtomicCell::new(None))
+        .collect();
     for depth in 0..=6 {
         for line in perft_results.lines() {
             // Parse the test line
